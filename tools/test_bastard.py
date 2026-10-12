@@ -367,14 +367,22 @@ class Timeline(unittest.TestCase):
         self.assertTrue(rules.blocks(b.SRC_REG, b.CHANGE, "HKLM\\...\\Certificates\\Root added"))
         self.assertFalse(rules.blocks(b.SRC_PM, b.INFO, "read QueryOpen C:\\x.dll"))
 
-    def test_the_defaults_leave_every_kernel_file_line_out(self):
+    def test_the_defaults_leave_the_kernel_file_reads_out(self):
         rules = b.Exclusions(b.DEFAULT_EXCLUSIONS)
-        for level in (b.INFO, b.CHANGE, b.WARN, b.ERROR):
-            self.assertTrue(rules.blocks(b.SRC_ETW, level, "[Kernel-File] Irp=0xFF | Status=0x0"), level)
+        self.assertTrue(rules.blocks(b.SRC_ETW, b.INFO, "[Kernel-File] Irp=0xFF | Status=0x0"))
+        self.assertTrue(rules.blocks(b.SRC_ETW, b.INFO, "[Microsoft-Windows-Kernel-File] Irp=0xFF"))
         self.assertTrue(rules.blocks(b.SRC_ETW, b.INFO, "x", "", "Provider: Kernel-File\nFileName=C:\\a.jpg"))
         self.assertFalse(rules.blocks(b.SRC_ETW, b.INFO, "[Kernel-Registry] RegSetValue HKCU\\Software"))
         self.assertFalse(rules.blocks(b.SRC_ETW, b.INFO, "[Shell-Core] wallpaper changed"))
         self.assertFalse(rules.blocks(b.SRC_PM, b.CHANGE, "file WriteFile C:\\TranscodedWallpaper"))
+
+    def test_the_defaults_keep_the_kernel_file_writes_and_denials(self):
+        rules = b.Exclusions(b.DEFAULT_EXCLUSIONS)
+        for level in (b.CHANGE, b.WARN, b.ERROR):
+            self.assertFalse(rules.blocks(b.SRC_ETW, level, "[Kernel-File] WriteFile | FileName=C:\\a.jpg"), level)
+        self.assertFalse(rules.blocks(b.SRC_ETW, b.ERROR,
+                                      "[Kernel-File] Status=0xc0000022 | FileName=TranscodedWallpaper"))
+        self.assertEqual(rules.blocked, 0)
 
     def test_sort_keys_cover_every_column(self):
         self.assertEqual(tuple(sorted(b.SORT_KEYS)), tuple(sorted(b.TREE_COLUMNS)))

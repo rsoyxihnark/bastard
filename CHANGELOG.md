@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.5.3
+
+- Bastard 1.5.3 keeps the Kernel-File writes and the refused file operations, and leaves only the reads out.
+- The filter now leaves out the ETW Kernel-File reads alone, so a refused write to the wallpaper file still shows.
+
 ## 1.5.2
 
 - Bastard 1.5.2 stops the event list moving on its own once a trace has ended, and leaves the Kernel-File events out.

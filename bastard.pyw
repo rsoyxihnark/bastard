@@ -25,7 +25,7 @@ import tkinter as tk
 import tkinter.font as tkfont
 from tkinter import filedialog, messagebox, ttk
 
-VERSION = "1.5.2"
+VERSION = "1.5.3"
 
 APP_NAME = "Bastard"
 IS_WIN = os.name == "nt"
@@ -878,7 +878,7 @@ DEFAULT_EXCLUSIONS = (
     "ProcMon | info | RegQueryValue HKCU\\SOFTWARE\\Microsoft\\Windows\\DWM\\ColorPrevalence",
     "| | DisallowRun",
     "| | Certificates",
-    "ETW | | Kernel-File",
+    "ETW | info | Kernel-File",
 )
 EXCLUSION_HELP = (
     "One rule per line: source | level | the text it holds | the text that keeps it",
