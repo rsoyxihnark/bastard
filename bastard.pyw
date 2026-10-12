@@ -24,7 +24,7 @@ import tkinter as tk
 import tkinter.font as tkfont
 from tkinter import filedialog, messagebox, ttk
 
-VERSION = "1.2.2"
+VERSION = "1.2.3"
 
 APP_NAME = "Bastard"
 IS_WIN = os.name == "nt"
@@ -2778,6 +2778,10 @@ PROBE_POLICY_KEYS = (
     ("HKCU", "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Policies\\System", "NoDispBackgroundPage"),
     ("HKCU", "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Policies\\System", "Wallpaper"),
     ("HKCU", "SOFTWARE\\Policies\\Microsoft\\Windows\\Personalization", "NoChangingWallpaper"),
+    ("HKCU", "SOFTWARE\\Policies\\Microsoft\\Windows\\Personalization", "NoLockScreen"),
+    ("HKCU", "SOFTWARE\\Policies\\Microsoft\\Windows\\Personalization", "NoChangingLockScreen"),
+    ("HKCU", "SOFTWARE\\Policies\\Microsoft\\Windows\\CloudContent", "DisableWindowsSpotlightFeatures"),
+    ("HKLM", "SOFTWARE\\Policies\\Microsoft\\Windows\\CloudContent", "DisableWindowsSpotlightFeatures"),
     ("HKLM", "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\PersonalizationCSP", "LockScreenImagePath"),
     ("HKLM", "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\PersonalizationCSP", "LockScreenImageUrl"),
     ("HKLM", "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\PersonalizationCSP", "DesktopImagePath"),
@@ -2792,6 +2796,7 @@ PROBE_CONSENT = ("userAccountInformation", "picturesLibrary", "documentsLibrary"
 PROBE_DISALLOW = ("photos.exe", "runtimebroker.exe", "systemsettings.exe", "backgroundtaskhost.exe",
                   "applicationframehost.exe", "winrt.runtime.dll")
 PROBE_IFEO = ("RuntimeBroker.exe", "SystemSettings.exe", "Photos.exe", "ApplicationFrameHost.exe")
+PROBE_SHELL_FOLDERS = ("Desktop", "AppData", "Local AppData", "My Pictures")
 PROBE_SHELL_VERBS = (
     ("HKCR", "SystemFileAssociations\\.jpg\\shell\\setaswallpaper"),
     ("HKCR", "SystemFileAssociations\\.jpeg\\shell\\setaswallpaper"),
@@ -2835,7 +2840,7 @@ class ProbeSource(Source):
     def _run(self):
         probes = (self._policy, self._appprivacy, self._consentstore, self._disallowrun, self._ifeo,
                   self._shell_verbs, self._winrt, self._transcode_write, self._acl, self._services,
-                  self._explorer_hints)
+                  self._explorer_hints, self._shell_folders)
         for probe in probes:
             if self.stopping():
                 break
@@ -3038,6 +3043,31 @@ class ProbeSource(Source):
                                "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Policies\\Explorer", "NoActiveDesktop")
         if value is not None:
             self._say("NoActiveDesktop = %s" % value)
+        value = reg_read_value(hive_handle("HKCU"),
+                               "Software\\Microsoft\\Windows\\CurrentVersion\\Policies\\Explorer",
+                               "NoSaveSettings")
+        if value is not None:
+            self._say("NoSaveSettings = %s" % value, CHANGE)
+
+    def _shell_folders(self):
+        self._say("L: user shell folders")
+        profile = (os.environ.get("USERPROFILE") or "").rstrip("\\").lower()
+        seen = 0
+        for tag in ("Shell Folders", "User Shell Folders"):
+            path = "Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\" + tag
+            for name in PROBE_SHELL_FOLDERS:
+                value = reg_read_value(hive_handle("HKCU"), path, name)
+                if value is None:
+                    continue
+                seen += 1
+                full = os.path.expandvars(value)
+                detail = "%s\\%s\nValue: %s\nExpanded: %s" % (path, name, value, full)
+                if profile and not full.lower().startswith(profile):
+                    self._say("%s [%s] is outside the user profile: %s" % (tag, name, full), WARN, detail=detail)
+                else:
+                    self._say("%s [%s] = %s" % (tag, name, full), INFO, detail=detail)
+        if not seen:
+            self._say("no shell folder values could be read", WARN)
 
 
 TRACE_PROVIDER_LINE = "{%s} 0xffffffffffffffff 5"
