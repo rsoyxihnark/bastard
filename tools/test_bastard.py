@@ -127,9 +127,9 @@ EVENTS_XML = "\n".join((
     "<EventRecordID>4242</EventRecordID><Execution ProcessID='880' ThreadID='1'/><Channel>Application</Channel></System>",
     "<EventData><Data>Photos.exe</Data></EventData><RenderingInfo Culture='en-US'><Message>Faulting application name: Photos.exe",
     'second line</Message><Level>Error</Level><Task>(100)</Task></RenderingInfo></Event>',
-    "<Event xmlns='http://schemas.microsoft.com/win/2004/08/events/event'><System><Provider Name='BastardSelfTest'/>",
+    "<Event xmlns='http://schemas.microsoft.com/win/2004/08/events/event'><System><Provider Name='TraceSelfTest'/>",
     "<EventID>999</EventID><Level>3</Level><TimeCreated SystemTime='2026-10-12T07:23:46Z'/><EventRecordID>4243</EventRecordID>",
-    "<Channel>Application</Channel></System><EventData><Data Name='Text'>Bastard self test event</Data></EventData></Event>",
+    "<Channel>Application</Channel></System><EventData><Data Name='Text'>Trace self test event</Data></EventData></Event>",
 ))
 
 
@@ -145,7 +145,7 @@ class EventLog(unittest.TestCase):
         self.assertEqual(text, "Application: Error 1000 from Application Error: Faulting application name: Photos.exe")
         self.assertEqual(level, b.ERROR)
         text, level = b.event_log_text(second)
-        self.assertEqual(text, "Application: Warning 999 from BastardSelfTest: Text=Bastard self test event")
+        self.assertEqual(text, "Application: Warning 999 from TraceSelfTest: Text=Trace self test event")
         self.assertEqual(level, b.WARN)
 
     def test_parse_broken_text(self):
@@ -270,7 +270,7 @@ class Timeline(unittest.TestCase):
         store = b.Store(limit=100)
         store.add([event(index / 500.0, b.SRC_ETW, b.KIND_ETW, b.INFO) for index in range(500)])
         store.add([event(float(index) + 1.0, b.SRC_REG, b.KIND_REG, b.CHANGE) for index in range(15)])
-        store.add([event(20.0, b.SRC_PM, b.KIND_REG, b.CHANGE, "BastardSelfTest [A] set")])
+        store.add([event(20.0, b.SRC_PM, b.KIND_REG, b.CHANGE, "TraceSelfTest [A] set")])
         kept = {}
         for ev in store.events():
             kept[ev.source] = kept.get(ev.source, 0) + 1
@@ -282,7 +282,7 @@ class Timeline(unittest.TestCase):
     def test_sample_events_keeps_the_quiet_sources(self):
         reads = [event(index / 400.0, b.SRC_PM, b.KIND_FILE, b.INFO) for index in range(400)]
         quiet = [event(float(index) + 1.0, b.SRC_REG, b.KIND_REG, b.CHANGE) for index in range(5)]
-        write = event(20.0, b.SRC_PM, b.KIND_REG, b.CHANGE, "BastardSelfTest [A] set")
+        write = event(20.0, b.SRC_PM, b.KIND_REG, b.CHANGE, "TraceSelfTest [A] set")
         events = sorted(reads + quiet + [write], key=b.Event.key)
         self.assertEqual([ev for ev in events[:30] if ev.source != b.SRC_PM], [])
         picked = b.sample_events(events, 30)
@@ -323,11 +323,11 @@ class Timeline(unittest.TestCase):
             (b.SRC_FILES, b.CHANGE, "deleted y.txt"),
             (b.SRC_PROC, b.INFO, "Started python.exe (PID 7) by Bastard.exe (PID 1)"),
             (b.SRC_PROC, b.INFO, "Exited cmd.exe (PID 9) with exit code 7 after 0.0 s"),
-            (b.SRC_REG, b.CHANGE, "HKCU\\Software\\BastardSelfTest [A] 1 (0x1) -> 2 (0x2)"),
-            (b.SRC_REG, b.CHANGE, "HKCU\\Software\\BastardSelfTest [B] added"),
-            (b.SRC_LOG, b.WARN, "Application: Bastard self test event"),
+            (b.SRC_REG, b.CHANGE, "HKCU\\Software\\TraceSelfTest [A] 1 (0x1) -> 2 (0x2)"),
+            (b.SRC_REG, b.CHANGE, "HKCU\\Software\\TraceSelfTest [B] added"),
+            (b.SRC_LOG, b.WARN, "Application: Trace self test event"),
             (b.SRC_WALL, b.INFO, "Wallpaper at start: C:\\x.jpg"),
-            (b.SRC_PM, b.CHANGE, "registry RegSetValue HKCU\\Software\\BastardSelfTest [A]"),
+            (b.SRC_PM, b.CHANGE, "registry RegSetValue HKCU\\Software\\TraceSelfTest [A]"),
             (b.SRC_WIN, b.INFO, "Window opened: Untitled - Notepad"),
         ]
         for source, level, text in wanted:
@@ -357,9 +357,9 @@ class Timeline(unittest.TestCase):
         self.assertFalse(rules.blocks(b.SRC_TRACE, b.INFO, "logman: EventName=FileIo | Type=Read | PID=4"))
         self.assertTrue(hasattr(b.TraceToolSource, "_leave_it_to_etw"))
 
-    def test_the_defaults_are_the_five_the_owner_asked_for(self):
+    def test_the_defaults_are_the_seven_the_owner_asked_for(self):
         rules = b.Exclusions(b.DEFAULT_EXCLUSIONS)
-        self.assertEqual(len(rules.rules), 5)
+        self.assertEqual(len(rules.rules), 7)
         self.assertTrue(rules.blocks(b.SRC_PM, b.INFO,
                                      "read RegQueryValue HKCU\\SOFTWARE\\Microsoft\\Windows\\DWM"
                                      "\\ColorPrevalence"))
@@ -599,6 +599,52 @@ class Timeline(unittest.TestCase):
         self.assertEqual(rules.log_bytes(), 28 * 1024 * 1024)
         self.assertLess(rules.log_bytes(), 30000000)
 
+    def test_log_bytes_counts_the_windows_line_ending(self):
+        saved = b.LINE_END_EXTRA
+        try:
+            b.LINE_END_EXTRA = 0
+            self.assertEqual(b.log_bytes("a\nb\nc\n"), 6)
+            b.LINE_END_EXTRA = 1
+            self.assertEqual(b.log_bytes("a\nb\nc\n"), 9)
+            self.assertEqual(b.log_bytes("no newline"), 10)
+        finally:
+            b.LINE_END_EXTRA = saved
+
+    def test_the_finished_log_stays_under_the_limit_with_crlf_endings(self):
+        folder = tempfile.mkdtemp(prefix="bastard_crlf_")
+        saved = (b.LOG_NEWLINE, b.LINE_END_EXTRA)
+        try:
+            b.LOG_NEWLINE = "\r\n"
+            b.LINE_END_EXTRA = 1
+            path = os.path.join(folder, "trace.log")
+            limit = 2 * 1024 * 1024
+            writer = b.LogWriter(path, ["header"], limit)
+            self.assertTrue(writer.start())
+            text = "RegQueryValue HKCU\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Thing"
+            for index in range(40000):
+                writer.put(event(float(index), b.SRC_PM, "Registry", b.INFO, text,
+                                 proc="explorer.exe", pid=4000))
+            writer.close(["footer line %d" % index for index in range(60)], True)
+            with open(path, "rb") as fh:
+                raw = fh.read()
+            self.assertIn(b"\r\n", raw)
+            self.assertNotIn(b"\n\n\n", raw.replace(b"\r\n", b"\n"))
+            self.assertTrue(writer.dropped > 0)
+            self.assertLess(len(raw), limit)
+            self.assertGreater(len(raw), limit // 2)
+        finally:
+            b.LOG_NEWLINE, b.LINE_END_EXTRA = saved
+            shutil.rmtree(folder, ignore_errors=True)
+
+    def test_the_defaults_leave_our_own_rows_out(self):
+        rules = b.Exclusions(b.DEFAULT_EXCLUSIONS)
+        self.assertTrue(rules.blocks(b.SRC_PM, b.INFO, "WriteFile C:\\Tools\\Bastard_20261012.log"))
+        self.assertTrue(rules.blocks(b.SRC_PM, b.CHANGE, "QueryOpen C:\\x", "Bastard.exe"))
+        self.assertTrue(rules.blocks(b.SRC_ETW, b.CHANGE, "[Kernel-Registry] x", "", "FileName=Bastard_1.log"))
+        self.assertFalse(rules.blocks(b.SRC_PROC, b.INFO, "Started python.exe (PID 7) by Bastard.exe (PID 1)"))
+        self.assertFalse(rules.blocks(b.SRC_SYSTEM, b.INFO, "Bastard 1.6.0 started"))
+        self.assertFalse(rules.blocks(b.SRC_LOG, b.WARN, "Application: Bastard crashed"))
+
     def test_marker_summary(self):
         text, level, _ = b.marker_summary(2, 100.0, [event(99.0), event(107.0)])
         self.assertEqual(level, b.WARN)
@@ -724,6 +770,38 @@ class Window(unittest.TestCase):
         app._rebuild()
         self.root.update()
         self.assertGreaterEqual(app.tree.yview()[1], 0.999)
+
+    def test_the_clear_button_empties_the_list_only(self):
+        scale = b.setup_style(self.root)
+        app = b.App(self.root, b.parse_options([]), scale)
+        now = time.time()
+        for index in range(40):
+            app.hub.emit(b.SRC_REG, b.KIND_REG, "HKCU\\Software\\Thing%d" % index, b.CHANGE, ts=now + index)
+        app._drain()
+        if app.rebuild_job is not None:
+            app.root.after_cancel(app.rebuild_job)
+            app.rebuild_job = None
+        app._rebuild()
+        self.assertEqual(len(app.tree.get_children()), 40)
+        app.clear_timeline()
+        self.assertEqual(len(app.tree.get_children()), 0)
+        self.assertEqual(len(app.store.events()), 0)
+        self.assertEqual(app.match_count, 0)
+        self.assertEqual(app.view_count, 0)
+        self.assertIsNone(app.rebuild_job)
+        app.hub.emit(b.SRC_REG, b.KIND_REG, "HKCU\\Software\\After", b.CHANGE, ts=now + 99)
+        app._drain()
+        self.assertEqual(len(app.tree.get_children()), 1)
+
+    def test_the_clear_button_sits_between_filter_and_options(self):
+        scale = b.setup_style(self.root)
+        app = b.App(self.root, b.parse_options([]), scale)
+        bar = app.btn_options.master
+        packed = [child for child in bar.pack_slaves() if child.pack_info().get("side") == "right"]
+        visual = list(reversed([str(child) for child in packed]))
+        self.assertEqual(app.btn_clear.cget("text"), "Clear")
+        self.assertEqual(visual.index(str(app.btn_clear)), visual.index(str(app.btn_filter)) + 1)
+        self.assertEqual(visual.index(str(app.btn_options)), visual.index(str(app.btn_clear)) + 1)
 
     def test_filters_search_and_selection(self):
         scale = b.setup_style(self.root)

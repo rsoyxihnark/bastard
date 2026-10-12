@@ -7,7 +7,7 @@ import tempfile
 import time
 
 IS_WIN = os.name == "nt"
-KEY = "Software\\BastardSelfTest"
+KEY = "Software\\TraceSelfTest"
 SECONDS = 32
 MARKER_AT = 10
 
@@ -102,7 +102,7 @@ def run_actions(folder, log):
             log["notepad_error"] = str(exc)
         try:
             result = subprocess.run(["eventcreate", "/T", "WARNING", "/ID", "999", "/L", "APPLICATION", "/SO",
-                                     "BastardSelfTest", "/D", "Bastard self test event"], capture_output=True, text=True)
+                                     "TraceSelfTest", "/D", "Trace self test event"], capture_output=True, text=True)
             log["eventcreate"] = result.returncode
             log["eventcreate_output"] = (result.stdout + result.stderr).strip()
         except OSError as exc:
@@ -144,12 +144,12 @@ def check(result, log, returncode):
                               for ev in events))
     add("list shows events", result.get("listed", 0) > 0, info=str(result.get("listed")))
     if IS_WIN:
-        add("registry value changed", has(events, "BastardSelfTest", "[A]", "1 (0x1) -> 2 (0x2)", source="Registry"))
-        add("registry value added", has(events, "BastardSelfTest", "[B] added", source="Registry"))
-        add("registry key created", has(events, "BastardSelfTest\\Sub created", source="Registry"))
-        add("registry value deleted", has(events, "BastardSelfTest", "[B] deleted", source="Registry"))
-        add("registry key deleted", has(events, "BastardSelfTest\\Sub deleted", source="Registry"))
-        add("event log entry", has(events, "Bastard self test event", source="Event Log"),
+        add("registry value changed", has(events, "TraceSelfTest", "[A]", "1 (0x1) -> 2 (0x2)", source="Registry"))
+        add("registry value added", has(events, "TraceSelfTest", "[B] added", source="Registry"))
+        add("registry key created", has(events, "TraceSelfTest\\Sub created", source="Registry"))
+        add("registry value deleted", has(events, "TraceSelfTest", "[B] deleted", source="Registry"))
+        add("registry key deleted", has(events, "TraceSelfTest\\Sub deleted", source="Registry"))
+        add("event log entry", has(events, "Trace self test event", source="Event Log"),
             info=log.get("eventcreate_output", ""))
         add("wallpaper source ran", has(events, "Wallpaper at start", source="Wallpaper"))
         if result.get("admin"):
@@ -159,7 +159,7 @@ def check(result, log, returncode):
         note = (status.get("ProcMon") or ["", ""])[1]
         if has(events, "ProcMon: capturing", source="System"):
             add("ProcMon capture read", has(events, "ProcMon: read", source="System"))
-            add("ProcMon saw the test key", has(events, "BastardSelfTest", source="ProcMon"))
+            add("ProcMon saw the test key", has(events, "TraceSelfTest", source="ProcMon"))
         else:
             add("ProcMon not used", True, hard=False, info=note)
         add("window opened", has(events, "Window opened", source="Windows"), hard=False,

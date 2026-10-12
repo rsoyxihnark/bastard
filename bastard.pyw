@@ -25,7 +25,7 @@ import tkinter as tk
 import tkinter.font as tkfont
 from tkinter import filedialog, messagebox, ttk
 
-VERSION = "1.5.4"
+VERSION = "1.6.0"
 
 APP_NAME = "Bastard"
 IS_WIN = os.name == "nt"
@@ -743,7 +743,7 @@ class LogWriter:
     def start(self):
         try:
             os.makedirs(os.path.dirname(self.path), exist_ok=True)
-            self.handle = open(self.path, "w", encoding="utf-8", errors="replace")
+            self.handle = open(self.path, "w", encoding="utf-8", errors="replace", newline=LOG_NEWLINE)
             head = "\n".join(self.header) + "\n\n"
             self.handle.write(head)
             self.handle.flush()
@@ -806,14 +806,14 @@ class LogWriter:
         try:
             if rewrite:
                 temp = self.path + ".tmp"
-                with open(temp, "w", encoding="utf-8", errors="replace") as fh:
+                with open(temp, "w", encoding="utf-8", errors="replace", newline=LOG_NEWLINE) as fh:
                     fh.write("\n".join(self.header) + "\n\n")
                     for ev in sorted(self.events, key=Event.key):
                         fh.write("\n".join(ev.log_lines()) + "\n")
                     fh.write("\n" + "\n".join(footer) + "\n")
                 os.replace(temp, self.path)
             else:
-                with open(self.path, "a", encoding="utf-8", errors="replace") as fh:
+                with open(self.path, "a", encoding="utf-8", errors="replace", newline=LOG_NEWLINE) as fh:
                     fh.write("\n" + "\n".join(footer) + "\n")
             return True
         except Exception as exc:
@@ -872,6 +872,8 @@ class Store:
 
 DEFAULT_LOG_MB = 28
 LOG_FOOTER_ROOM = 65536
+LOG_NEWLINE = "\r\n" if IS_WIN else "\n"
+LINE_END_EXTRA = len(LOG_NEWLINE) - 1
 PROCMON_ROW_LIMIT = 1000000
 EXCLUSION_PARTS = 4
 DEFAULT_EXCLUSIONS = (
@@ -880,6 +882,8 @@ DEFAULT_EXCLUSIONS = (
     "| | Certificates",
     "ETW | info | Kernel-File",
     "ProcMon | | chrome.exe",
+    "ProcMon | | Bastard",
+    "ETW | | Bastard",
 )
 EXCLUSION_HELP = (
     "One rule per line: source | level | the text it holds | the text that keeps it",
@@ -892,7 +896,7 @@ EXCLUSION_HELP = (
 
 
 def log_bytes(text):
-    return len(text.encode("utf-8", "replace"))
+    return len(text.encode("utf-8", "replace")) + text.count("\n") * LINE_END_EXTRA
 
 
 def parse_exclusion(line):
@@ -3894,6 +3898,8 @@ class App:
         self.timer.pack(side="left", padx=self.px(14))
         self.btn_options = ttk.Button(bar, text="Options", command=self.edit_options)
         self.btn_options.pack(side="right", padx=self.px(2))
+        self.btn_clear = ttk.Button(bar, text="Clear", command=self.clear_timeline)
+        self.btn_clear.pack(side="right", padx=self.px(2))
         self.btn_filter = ttk.Button(bar, text="Filter", command=self.edit_filter)
         self.btn_filter.pack(side="right", padx=self.px(2))
         admin_text = "administrator" if self.admin else ("not administrator" if IS_WIN else "")
@@ -4402,6 +4408,19 @@ class App:
             self.menu.tk_popup(event.x_root, event.y_root)
         finally:
             self.menu.grab_release()
+
+    def clear_timeline(self):
+        if self.rebuild_job is not None:
+            self.root.after_cancel(self.rebuild_job)
+            self.rebuild_job = None
+        children = self.tree.get_children()
+        if children:
+            self.tree.delete(*children)
+        self.store.clear()
+        self.match_count = 0
+        self.view_count = 0
+        self._show_detail("")
+        self.flash("The list is cleared, the log on disk still holds everything")
 
     def _menu_event(self):
         return self.store.by_seq.get(int(self.menu_row)) if self.menu_row.isdigit() else None

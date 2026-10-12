@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.6.0
+
+- Bastard 1.6.0 keeps the trace log inside its limit on Windows, adds a Clear button, and leaves its own rows out.
+- Fixed the trace log growing past the limit it was given whenever it ran on Windows.
+- The Clear button between Filter and Options empties the event list, and the log on disk still holds everything.
+- The filter now starts with the ProcMon and ETW rows about Bastard itself left out.
+
 ## 1.5.4
 
 - Bastard 1.5.4 keeps the trace log small enough to attach, and leaves the Chrome rows out of the timeline.
