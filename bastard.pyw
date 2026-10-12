@@ -25,7 +25,7 @@ import tkinter as tk
 import tkinter.font as tkfont
 from tkinter import filedialog, messagebox, ttk
 
-VERSION = "1.5.0"
+VERSION = "1.5.1"
 
 APP_NAME = "Bastard"
 IS_WIN = os.name == "nt"
@@ -680,8 +680,9 @@ class Hub:
     def emit(self, source, kind, text, level=INFO, pid=None, proc="", detail="", ts=None):
         text = clean_text(text)
         proc = clean_text(proc)
+        detail = clean_text(detail)
         rules = self.exclusions
-        if rules is not None and rules.blocks(source, level, text, proc):
+        if rules is not None and rules.blocks(source, level, text, proc, detail):
             return None
         original = ts
         ts, fine = sane_time(ts)
@@ -689,7 +690,6 @@ class Hub:
             self.bad_times.add(source)
             LOG.warning("%s gave an event time that cannot be right (%r), so the time it arrived is used: %s",
                         source, original, one_line(text, 120))
-        detail = clean_text(detail)
         with self.lock:
             self.seq += 1
             ev = Event(ts, self.seq, source, kind, level, pid or None, proc, text, detail)
@@ -875,7 +875,7 @@ DEFAULT_EXCLUSIONS = (
 EXCLUSION_HELP = (
     "One rule per line: source | level | the text it holds | the text that keeps it",
     "An empty part matches anything. The fourth part rescues an event the third one caught.",
-    "The third and fourth parts read the process name as well, so a rule can name a process.",
+    "The third and fourth parts read the process name and the detail lines too, not just the event.",
     "Sources: Registry Files Processes Windows Event Log ProcMon Wallpaper ETW WMI Probes Trace Tools",
     "Levels: info change warn error marker. System events are never left out.",
     "Delete every line to leave nothing out. An empty list stays empty.",
@@ -910,19 +910,19 @@ class Exclusions:
         self.lines = [line.strip() for line in lines if line.strip()]
         self.rules = [rule for rule in (parse_exclusion(line) for line in self.lines) if rule]
 
-    def blocks(self, source, level, text, proc=""):
+    def blocks(self, source, level, text, proc="", detail=""):
         if not self.enabled or source == SRC_SYSTEM or not self.rules:
             return False
-        low = (text or "").lower()
-        if proc:
-            low = proc.lower() + " " + low
         name = (source or "").lower()
         mark = (level or "").lower()
+        low = None
         for want_source, want_level, holds, keeps in self.rules:
             if want_source and want_source != name:
                 continue
             if want_level and want_level != mark:
                 continue
+            if low is None:
+                low = " ".join(part for part in (proc, text, detail) if part).lower()
             if holds and holds not in low:
                 continue
             if keeps and keeps in low:
@@ -4060,7 +4060,7 @@ class App:
     def _match(self, ev):
         if ev.kind == KIND_MARK:
             return True
-        if self.rules is not None and self.rules.blocks(ev.source, ev.level, ev.text, ev.proc):
+        if self.rules is not None and self.rules.blocks(ev.source, ev.level, ev.text, ev.proc, ev.detail):
             return False
         chip = self.source_chips.get(ev.source)
         if chip is not None and not chip.on:

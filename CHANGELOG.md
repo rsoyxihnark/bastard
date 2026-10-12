@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.5.1
+
+- Bastard 1.5.1 leaves out an event when the filter word sits in its detail lines instead of in the line itself.
+- Fixed a rule naming a word like Certificates not leaving out the long Kernel-File events that hold it.
+- A filter rule reads an event's detail lines too now, so a word anywhere in the event is enough to leave it out.
+
 ## 1.5.0
 
 - Bastard 1.5.0 can leave a whole process out of the timeline, from the right-click menu or by naming it in a rule.

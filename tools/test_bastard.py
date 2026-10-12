@@ -505,6 +505,36 @@ class Timeline(unittest.TestCase):
         self.assertFalse(rules.blocks(b.SRC_SYSTEM, b.INFO, "Trace started", "Bastard.exe"))
         self.assertTrue(rules.blocks(b.SRC_PROC, b.INFO, "started", "Bastard.exe"))
 
+    def test_a_rule_reads_the_detail_lines(self):
+        path = ("\\Device\\HarddiskVolume3\\Users\\K\\AppData\\Roaming\\Microsoft"
+                "\\SystemCertificates\\My\\Certificates\\9F1A3C7E2B5D8046A1C3E5F70928BD4C")
+        parts = ["Pad%d=0x%s" % (index, "A" * 40) for index in range(16)] + ["FileName=" + path]
+        detail = " | ".join(parts)
+        text = b.one_line("[Kernel-File] " + detail, 600)
+        body = "Provider: Kernel-File\nEvent ID: 12\n" + detail
+        self.assertNotIn("certificates", text.lower())
+        self.assertIn("certificates", body.lower())
+        rules = b.Exclusions(["| | DisallowRun", "| | Certificates"])
+        self.assertTrue(rules.blocks("ETW", b.INFO, text, "", body))
+        self.assertFalse(rules.blocks("ETW", b.INFO, text, "", "Provider: Kernel-File\nEvent ID: 12"))
+
+    def test_a_rule_matches_part_of_a_longer_word(self):
+        rules = b.Exclusions(["| | Certificates"])
+        self.assertTrue(rules.blocks("ETW", b.INFO, "opened SystemCertificates store"))
+        self.assertTrue(rules.blocks("ETW", b.INFO, "plain", "", "detail holds SystemCertificates here"))
+        self.assertFalse(rules.blocks("ETW", b.INFO, "nothing of the sort"))
+
+    def test_the_fourth_part_rescues_on_the_detail_too(self):
+        rules = b.Exclusions(["ETW | | Certificates | FileName="])
+        self.assertTrue(rules.blocks("ETW", b.INFO, "x", "", "holds Certificates and no name"))
+        self.assertFalse(rules.blocks("ETW", b.INFO, "x", "", "holds Certificates with FileName=C:\\a"))
+
+    def test_the_hub_leaves_out_an_event_caught_by_its_detail(self):
+        hub = b.Hub(b.Exclusions(["| | Certificates"]))
+        self.assertIsNone(hub.emit("ETW", "File", "[Kernel-File] Pad=1", detail="FileName=SystemCertificates"))
+        self.assertIsNotNone(hub.emit("ETW", "File", "[Kernel-File] Pad=1", detail="FileName=Wallpaper"))
+        self.assertEqual(hub.exclusions.blocked, 1)
+
     def test_marker_summary(self):
         text, level, _ = b.marker_summary(2, 100.0, [event(99.0), event(107.0)])
         self.assertEqual(level, b.WARN)
