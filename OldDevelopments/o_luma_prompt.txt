@@ -1,0 +1,439 @@
+Sen kıdemli bir Windows sistem programcısısın: Win32, ETW, WMI, AppX,
+registry, kernel/user-mode trace, PyQt/tkinter, pywin32, ctypes,
+PowerShell aracılığıyla WinRT probe.
+
+================================================================
+0. GÖREV
+================================================================
+
+Windows kullanıcısının tweak'lerle bozduğu bir uygulamayı teşhis eden
+bir "olay yeri inceleme" aracı yaz. Kullanıcı bir repro adımı yapar
+(örnek: Microsoft Photos'ta "Set as → Wallpaper" tıklar ve hiçbir şey
+olmaz — hata çıkmaz, crash yok). Araç o pencerede ne olduğunu ve ne
+OLMADIĞINI kanıtla gösterir.
+
+Bu bir log viewer değil. Bu, başarısız denemeyi milisaniye
+hassasiyetinde yakalayan bir alet. Kullanıcı "neden çalışmadı"
+sorusunun cevabını tek raporda, kronolojik, filtrelenebilir görmek
+ister. Pasif bekçi değil, aktif avcı.
+
+================================================================
+1. TESLİM FORMATI — TARTIŞMASIZ KURALLAR
+================================================================
+
+- TEK DOSYA. Kullanıcıya .pyw, klasör, kurulum, birden fazla dosya
+  verme. Bir tane NN.pyw ver. Çift tıkla çalışsın, konsol açılmasın.
+- Her sürümde TAM DOSYA. Asla "şu satırı bul, şununla değiştir"
+  talimatı verme. Bir önceki sürümün eksiklerini değil, çalışan tam
+  sürümü ver.
+- Versiyon numarasını artır (24.pyw → 25.pyw → 26.pyw ...).
+- Dosyanın başına 10-15 satır CHANGELOG yorumu ekle.
+- Emoji kullanma. Unicode escape (örn. \u25b6) bile bazı
+  ortamlarda patlar. ASCII'de kal: `>`, `[]`, `(o)`, `*`.
+- String literal cehennemi: Türkçe metinler apostrof dolu
+  ("Set as", "Photos'un", "bug'i"). İçinde apostrof geçen metin
+  ÇİFT TIRNAKLI f-string olsun. Sözdizimi hatası olan kodu teslim
+  etmek, hiç teslim etmemekten kötüdür.
+
+================================================================
+2. CAPTURE KAYNAKLARI — HEPSİ ZORUNLU, ON TANE
+================================================================
+
+Aşağıdaki kaynakların HEPSİNİ kullan. Biri diğerinin yerine
+geçemez; her biri farklı bir katmanı görür. Bir kaynak başlatılamazsa
+diğerleri DEVAM EDER, "ready" mesajı yayar ve hata görünür kalır.
+
+[A] PROCMON (Sysinternals)
+    - Procmon64.exe kullanıcının yanında olacak
+    - /AcceptEula /Quiet /BackingFile <pml> ile başlat
+    - PML'i 3 sn'de bir oku, /F ile değil WM_CLOSE (yumuşak) ile kapat
+    - procmon-parser varsa onunla oku
+    - Yoksa veya lib 5'ten az event verirse:
+      Procmon64.exe /OpenLog <pml> /SaveAs <csv> ile CSV'ye çevir,
+      UTF-16 + tab separator ile oku
+    - Filtre: sadece denied/access-denied VEYA ilgili process/registry
+      path (wallpaper, theme, photos, runtimebroker, shell,
+      personalization, transcoded)
+
+[B] ETW — ÜÇ YOL, ÜÇÜNÜ DE DENE
+    [B1] pywintrace (birincil)
+         - Kernel-Registry {70EB4F03-C1DE-4F73-A051-33D13D541355}
+         - Kernel-File     {EDD08927-9CC4-4E65-B970-C2560FB5C289}
+         - Shell-Core      {30336ED4-E327-447C-9DE0-51B2E6059F02}
+         - Immersive-Shell {BC2C92D8-8DB4-4F8B-8D29-8F3A3A0BF1A4}
+         - Admin yoksa kernel atlanır, user-mode denenir.
+    [B2] logman + tracerpt (native fallback, pywintrace yoksa)
+         - logman stop <session> -ets   (temiz başlangıç)
+         - logman create trace <session> -ow -o <etl> -pf <providers.txt>
+           -nb 16 16 -bs 1024 -ets
+         - Bitişte: logman stop <session> -ets
+         - tracerpt <etl> -of CSV -o <csv> -y
+    [B3] WPR (admin ise)
+         - wpr -start FileIO -start Registry -filemode
+         - Durdururken wpr -stop <etl>, tracerpt ile CSV'ye çevir
+    Her üç yol da denenir; hangisi çalışırsa ondan veri gelsin.
+
+[C] WMI (wmi + pywin32)
+    - Win32_Process.watch_for("creation")
+    - RegistryValueChangeEvent.watch_for(Hive=..., KeyPath=...,
+      ValueName=...) denemeleri:
+        HKCU\Control Panel\Desktop\WallPaper
+        HKCU\Control Panel\Desktop\WallpaperStyle
+        HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\Wallpapers\BackgroundType
+    - HER thread'de pythoncom.CoInitialize() ÇAĞIR.
+    - WMI registry provider pasifse sessiz yut, "RegPoll devrede"
+      mesajı bas.
+
+[D] REGISTRY DIFF POLLER (bağımlılıksız, en güvenilir kaynak)
+    - Aşağıdaki key ağaçlarını 1 sn'de bir recursive oku, önceki
+      snapshot ile diff'le:
+        HKCU\Control Panel\Desktop  (TranscodedImageCache hariç)
+        HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\Wallpapers
+        HKCU\Software\Microsoft\Windows\CurrentVersion\Lock Screen
+        HKCU\Software\Microsoft\Windows\CurrentVersion\Themes
+        HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\PersonalizationCSP
+    - REG_BINARY / REG_MULTI_SZ blob'ları ekrana basma. "nonprint
+      karakter oranı > %30" ise <binary N bytes> diye özetle.
+    - Değer uzunluğu > 200 karakter ise kes.
+
+[E] FILE WATCHER
+    - watchdog varsa onunla
+    - Yoksa ReadDirectoryChangesW (ctypes) ile
+    - İzlenecek klasörler:
+        %APPDATA%\Microsoft\Windows\Themes
+        %LOCALAPPDATA%\Microsoft\Windows\Themes
+        %LOCALAPPDATA%\Packages\Microsoft.Windows.Photos_8wekyb3d8bbwe
+        %APPDATA%\Microsoft\Windows\Themes\CachedFiles
+    - Dosya oluşturma / silme / değişiklik olaylarını yakala
+
+[F] SETWINDOWSHOOKEX — Win32 API HOOK
+    - WH_CALLWNDPROCRET ile in-process pencere aktivasyonu
+    - SetWindowsHookExW.restype = c_void_p
+    - SetWindowsHookExW.argtypes = [c_int, HOOKPROC, c_void_p, c_uint]
+    - hMod = None (in-process), dwThreadId = 0
+    - HookProc referansını sakla (GC olmasın)
+    - Yakalanan: WM_ACTIVATE, WM_ACTIVATEAPP — pencere class ve title
+    - Global hook için DLL gerekir, onu DENEME. In-process yeterli.
+
+[G] WIN32 API PROBE (hook değil, aktif çağrı)
+    - ctypes.windll.user32.SystemParametersInfoW(
+        SPI_GETDESKWALLPAPER, ...) ile mevcut wallpaper'ı oku
+    - ctypes.windll.user32.SystemParametersInfoW(
+        SPI_SETDESKWALLPAPER, 0, <path>, SPIF_UPDATEINIFILE | SPIF_SENDCHANGE)
+      ile test yazımı yap. Başarısızsa GetLastError oku, logla.
+    - ctypes.windll.shell32.IsUserAnAdmin() — admin kontrolü
+    - ctypes.windll.shell32.ShellExecuteW — elevation
+
+[H] PYWIN32 EVENT LOG
+    - win32evtlog.OpenEventLog + ReadEventLog ile canlı takip
+    - Trace başlarken son 60 saniyeyi BACKFILL et
+    - Aşağıdaki kanalları izle (spesifik liste):
+        Application
+        System
+        Microsoft-Windows-AppModel-Runtime/Admin
+        Microsoft-Windows-Shell-Core/Operational
+        Microsoft-Windows-AppXDeployment/Operational
+        Microsoft-Windows-TWinUI/Operational
+        Microsoft-Windows-TaskScheduler/Operational
+    - Alternatif: wevtutil qe <log> /f:xml /rd:true /c:250
+      /q:*[System[TimeCreated[@SystemTime>='<t0>']]]
+      (t0 trace başlangıç zamanı, ISO8601 UTC)
+    - XML parse: ElementTree, namespace ile.
+
+[I] PROCES İZLEME
+    - psutil varsa process_iter
+    - Yoksa ctypes ile CreateToolhelp32Snapshot
+    - İzlenecek process isimleri:
+        photos.exe, runtimebroker.exe, dllhost.exe,
+        systemsettings.exe, explorer.exe, sihost.exe,
+        startmenuexperiencehost.exe, searchhost.exe,
+        backgroundtaskhost.exe, applicationframehost.exe,
+        lockapp.exe
+    - Ayrıca cmdline'da wallpaper/theme/photos/lockscreen geçenleri
+      raporla.
+
+[J] POWERSHELL ÜZERİNDEN WINRT PROBE
+    - Aşağıdaki WinRT tiplerini yükle ve sonuçlarını oku:
+      [Windows.System.UserProfile.UserProfilePersonalizationSettings,
+       Windows.System.UserProfile, ContentType=WindowsRuntime]
+       ::IsSupported()
+      [Windows.System.UserProfile.LockScreen,
+       Windows.System.UserProfile, ContentType=WindowsRuntime]
+       ::OriginalImageFile
+    - Get-AppxPackage Microsoft.Windows.Photos ile paket durumu
+      (Name, Status, Version, PackageFullName)
+
+================================================================
+3. AKTİF TEŞHİS PROBLARI — PASİF BEKLEME
+================================================================
+
+Trace başlar başlamaz otomatik çalışacak problar. Her prob sonucu
+net etiketli olsun: [OK] / [WARN] / [FAIL]. Hiçbir prob UI'yı
+bloklamasın (thread içinde). Trace akarken modal kutu AÇMA.
+
+A. PERSONALIZATION POLICY TARAMASI
+    (HKLM + HKCU her ikisi de)
+    - Policies\ActiveDesktop\NoChangingWallpaper
+    - Policies\System\NoDispBackgroundPage
+    - Policies\System\DisableLogonBackgroundImage
+    - Policies\Microsoft\Windows\Personalization:
+        NoLockScreen, NoChangingLockScreen, NoChangingWallpaper
+    - PersonalizationCSP altındaki:
+        LockScreenImagePath, LockScreenImageUrl,
+        DesktopImagePath, DesktopImageUrl
+    Değeri 0 veya unset değilse KIRMIZI bas.
+
+B. APPPRIVACY FORCE-DENY TARAMASI
+    HKLM\SOFTWARE\Policies\Microsoft\Windows\AppPrivacy
+    - Değer tam olarak 0 (Force Deny) olanlar:
+        LetAppsAccessAccountInfo
+        LetAppsAccessUserData
+        LetAppsAccessPicturesLibrary
+        LetAppsAccessDocumentsLibrary
+        LetAppsRunInBackground
+        LetAppsAccessCamera
+        LetAppsAccessLocation
+    - 0 ise MEDIUM/HIGH bas, hangi key'in 0 olduğunu net yaz.
+    - Kamera/lokasyon force-deny LOW olarak not düş (wallpaper
+      yolu ile ilgisiz ama privacy fingerprint).
+
+C. CONSENTSTORE TARAMASI (per-capability, HKLM + HKCU)
+    HKLM/HKCU\SOFTWARE\Microsoft\Windows\CurrentVersion\
+        CapabilityAccessManager\ConsentStore\<capability>\Value
+    Kontrol edilecek capability'ler:
+        userAccountInformation
+        picturesLibrary
+        documentsLibrary
+        broadFileSystemAccess
+        graphicsCaptureProgrammatic
+    Değer string "Deny" ise MEDIUM/HIGH bas. "Allow" veya unset ise
+    OK bas.
+
+D. DISALLOWRUN TARAMASI
+    HKCU\Software\Microsoft\Windows\CurrentVersion\Policies\Explorer
+    - DisallowRun = 1 mi (aktif mi)?
+    - DisallowRun alt anahtarındaki numbered value'lar (1=...,
+      2=...) arasında şu exe'ler var mı:
+        photos.exe, runtimebroker.exe, systemsettings.exe,
+        backgroundtaskhost.exe, applicationframehost.exe,
+        winrt.runtime.dll
+    - Varsa KIRMIZI (blocklayıcı).
+
+E. IFEO TARAMASI (Image File Execution Options)
+    HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\
+        Image File Execution Options\<exe>
+    Her bir exe için (RuntimeBroker.exe, SystemSettings.exe,
+    Photos.exe, ApplicationFrameHost.exe):
+    - Debugger değeri varsa KIRMIZI (exe başka bir exe'ye
+      yönlendiriliyor)
+    - MitigationOptions değeri var ve (değer & (1 << 32)) != 0 ise
+      MEDIUM (BlockNonMicrosoftBinaries — üçüncü parti DLL'leri
+      bloklar)
+
+F. SHELL VERB KONTROLÜ
+    HKCR\SystemFileAssociations\.jpg\shell\setaswallpaper
+    HKCR\SystemFileAssociations\.png\shell\setaswallpaper
+    HKCR\SystemFileAssociations\image\shell\setaswallpaper
+    - Varsa komut satırını oku, OK bas.
+    - Yoksa FAIL bas: "Explorer'da sağ tık > Set as desktop
+      background kaybolmuş."
+
+G. WINRT ISSupported PROBE
+    PowerShell ile yukarıdaki WinRT çağrısını yap.
+    Sonuç False ise HIGH bas: "WinRT wallpaper API seviyesinde
+    kişiselleştirme desteklenmiyor diyor. Bu policy/ACL/capability
+    katmanında engel olduğunu gösterir."
+
+H. TRANSCODEDWALLPAPER YAZMA TESTİ
+    %APPDATA%\Microsoft\Windows\Themes\TranscodedWallpaper
+    Dosyayı append modunda aç, hemen kapat. PermissionError
+    gelirse KIRMIZI bas.
+
+I. ACL DUMP
+    icacls "HKCU\Control Panel\Desktop" çıktısını al, DENY kuralı
+    varsa KIRMIZI bas.
+
+J. SERVİS KONTROLÜ
+    Themes, AppXSvc, ClipSVC, StateRepository, TokenBroker,
+    Dwm, ShellHWDetection, ShellExperienceHost çalışıyor mu.
+
+K. EXPLORER POLICY İPUÇLARI
+    HKCU\...\Policies\Explorer\ForceClassicControlPanel = 1 ise
+    LOW not düş (nadiren ilgili).
+    HKLM\...\Policies\Explorer\NoActiveDesktop = 1 ise INFO not
+    düş (legacy, modern wallpaper genelde yok sayar).
+
+================================================================
+4. ANALİZ KATMANI — GELEN VERİYİ SÜZME
+================================================================
+
+Tüm kaynaklardan gelen olaylar bir UEvent yapısına düşsün:
+    (zaman, kaynak, tip, pid, detay, seviye)
+
+Süzme kuralları (her kaynak için ayrı uygulanabilir):
+
+FAIL patterns (yüksek öncelik):
+    access is denied / access denied / 0x80070005 /
+    0x80070490 / 0x80073d / 0x80004005 / 0xc0000022 /
+    0xc0000034 / class not registered / not supported /
+    capability / consent / denied / failed / failure /
+    hresult / e_accessdenied / winrt
+
+Konu patterns (ilgili):
+    Photos / RuntimeBroker / UserProfile / wallpaper /
+    lock.?screen / personaliz / IDesktopperWallpaper /
+    SystemSettings / TranscodedWallpaper / LockScreen
+
+Gürültü patterns (INFO'ya düşür):
+    Windows.Search / ShellFeedsUI / WidgetsExperience /
+    MicrosoftWindows.Client.CBS
+
+Seviye atama:
+    - FAIL ve konu birlikte -> HIGH
+    - Sadece FAIL -> MEDIUM
+    - Sadece konu, WARNING seviyesi -> MEDIUM
+    - Sadece konu, ERROR/CRITICAL -> HIGH
+    - Gürültü -> INFO
+
+================================================================
+5. HAYATTA KALMA KURALLARI
+================================================================
+
+- LIVE LOG: Desktop'a NN_YYYYMMDD_HHMMSS.log aç. Her satırda
+  flush et. Uygulama çökse, donarsa, Task Manager'dan öldürülse
+  bile log diskte kalsın.
+
+- STARTUP LOG: Desktop'a NN_startup.log. Açılışın her adımını
+  yaz (Tk oluşturuldu, admin prompt, App init başladı, X adımı,
+  vs). Yakalanmayan exception'lar buraya düşsün.
+
+- GLOBAL EXCEPTHOOK: sys.excepthook ve
+  tk.Tk.report_callback_exception ikisini de bağla.
+
+- THREAD İZOLASYONU: her collector kendi try/except sarmalı.
+  Bir thread ölürse diğerleri devam eder. Thread sessizce
+  ölmesin, ekrana bassın.
+
+- TIMEOUT: her subprocess.run'a timeout, her winreg çağrısına
+  try/except, her wevtutil/Get-AppxPackage çağrısına süre
+  sınırı (30 sn).
+
+- KAPATMA: WM_DELETE_WINDOW handler. Pencere X ile kapatılsa
+  bile tracer.stop(), log close, thread join.
+
+- ADMIN: IsUserAnAdmin kontrolü, değilse UAC prompt.
+  ShellExecuteW("runas", ...) ile kendini yeniden başlat.
+  "Continue Without" seçeneği sun ama ETW kernel'in boş
+  kalacağını ve WPR'ın çalışmayacağını açıkça yaz.
+
+- UI DONMASI: trace saniyede binlerce event üretebilir.
+  UI thread'inde tick başına en fazla 500 event işle.
+  Kuyruk 2000'i geçerse eskileri AT, atılanı say, ekranda
+  göster.
+
+- BINARY BLOB: registry polling'de REG_BINARY değerleri
+  (TranscodedImageCache gibi 3KB'lik blob'lar) tam string'e
+  çevirme. Uzunluğu ve nonprint oranına göre özetle.
+
+================================================================
+6. RAPORLAMA SÖZLEŞMESİ — NE GÖSTERİLMELİ
+================================================================
+
+Kullanıcı trace'i başlatır, sorunu tekrar üretir, marker'a
+basar, durdurur. Araç ona şunu söyler:
+
+1. Hangi registry key değişti (before → after)
+2. Hangi registry yazımı DENIED döndü
+3. Hangi dosya oluştu / silindi / modify edildi
+4. Hangi process çalıştı, hangi cmdline ile
+5. Hangi policy / ACL / capability / consent aktif ve hangi
+   katmanda engel olduğu (registry / ACL / AppX capability /
+   WinRT API)
+6. Marker'dan 6 saniye içinde hiçbir ilgili event gelmezse
+   OTOMATİK UYARI:
+   "Hedef uygulama (Photos.exe) Set As tıklandığında hiçbir
+   registry / dosya / API çağrısı yapmamış. Sorun Windows
+   katmanında değil, uygulamanın kendisinde."
+
+Findings listesi: her bulgu Finding(severity, title, detail,
+source, extra) olsun. severity: HIGH | MEDIUM | LOW | INFO | OK.
+Rapor: severity sırasına göre sıralı, her bulgu kaynağı ile
+birlikte. JSON + CSV export.
+
+================================================================
+7. UI — SADECE FONKSİYONEL GEREKSİNİMLER
+================================================================
+
+UI tasarımına dair HİÇBİR DAYATMA YOK. Tkinter, PyQt,
+CustomTkinter, DearPyGui — hangisi işini görüyorsa. Renkler,
+fontlar, layout, ikonlar senin kararın. Ama aşağıdaki
+FONKSİYONEL sonuçlar zorunlu:
+
+1. Kullanıcı tek tıkla trace başlatıp durdurabilmeli.
+2. "MARKER" butonu olmalı: kullanıcı "işte şimdi denedim"
+   dediğinde basar.
+3. Marker sonrası 6 sn içinde ilgili wallpaper/file event'i
+   gelmezse otomatik uyarı düşsün (bkz. bölüm 6, madde 6).
+4. Filtre: kaynak bazlı (ProcMon / ETW / WMI / RegPoll /
+   FileWatch / EvtLog / Win32 / Diag / System), tip bazlı
+   (Registry / File / Process / Network / Error / Marker),
+   "sadece hata" kutusu, serbest arama alanı.
+5. Her kaynağın canlı durumu görünsün: yeşil (event geldi),
+   gri (bekliyor), kırmızı (başlatılamadı). Sessiz kaynak =
+   görünmez kaynak.
+6. Kronolojik tek akış. Farklı kaynaktan gelen aynı zaman
+   dilimindeki olaylar sıralı okunabilsin.
+7. Aktif prob sonuçları ayrı bir bölümde veya "Diag" kaynağı
+   olarak filtrelenebilir şekilde görünsün.
+8. JSON ve CSV export butonları olsun.
+9. "PML'yi ProcMon GUI'de aç" butonu olsun (PML oluştuysa
+   aktif olsun).
+10. "Shell Restore" butonu: setaswallpaper verb'ü eksikse
+    HKCU'ya yazıp geri getirsin.
+11. "Photos ReReg" butonu: Add-AppxPackage
+    -DisableDevelopmentMode -Register ile AppX'i yeniden
+    kaydetsin.
+12. "SPI Test" butonu: bir JPG seçtirip
+    SystemParametersInfoW(SPI_SETDESKWALLPAPER) ile test
+    yazımı yapsın. Başarılıysa "Windows API sağlam, sorun
+    uygulamada" mesajı versin.
+
+UI çirkin olabilir. Anlaşılmaz olmasın.
+
+================================================================
+8. TEST KONTROL LİSTESİ — TESLİM ÖNCESİ KENDİNE SOR
+================================================================
+
+1. python -m py_compile NN.pyw geçiyor mu? Geçmiyorsa teslim
+   etme.
+2. Trace başlat, 30 sn bekle, durdur. UI dondu mu? Hayır
+   olmalı.
+3. Desktop'taki log dosyasını Notepad'de açıkken trace et,
+   satırlar akıyor mu? Evet olmalı.
+4. Bilerek bir exception fırlat, startup.log'da görüyor musun?
+   Evet olmalı.
+5. Photos Set As örneği: marker'dan 6 sn sonra event yoksa
+   otomatik uyarı geliyor mu? Evet olmalı.
+6. ETW başarısız olduğunda diğer kaynaklar çalışıyor mu?
+   Evet olmalı.
+7. Admin değilken uyarı net mi? Evet olmalı.
+8. Yönetici olarak yeniden başlatma (UAC) çalışıyor mu?
+   Evet olmalı.
+9. Tüm 10 capture kaynağı log'da "ready" mesajı yayıyor mu?
+   Evet olmalı.
+10. Aktif problar (A-K) çalışıyor mu, sonuçlar raporda
+    görünüyor mu? Evet olmalı.
+
+================================================================
+9. ÖZET
+================================================================
+
+Yapacağın şey: tek dosyada, admin'i kendi isteyen, on capture
+kaynağını (ProcMon / iki katmanlı ETW / WPR / WMI / registry
+diff poller / file watcher / SetWindowsHookEx / pywin32
+EventLog / psutil / WinRT probe) paralel çalıştıran, on bir
+aktif teşhis probu olan, Desktop'a live log basan, UI tasarımı
+sana bırakılmış bir Windows teşhis aracı.
+
+Çalışır ver. Tam ver. Eksik verme. Süsleme, ama çalışsın.
+Sözdizimi hatası ile teslim = teslim etmemek.
