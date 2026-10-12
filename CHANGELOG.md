@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.4.0
+
+- Bastard 1.4.0 sorts the timeline by any column, and starts the filter with three rules instead of the old ones.
+- Clicking a column heading sorts the listed events by it, and clicking the same heading again turns the order around.
+- The heading shows which column the sort is on and which way it runs, and the choice is kept for the next trace.
+- Clicking Time puts the timeline back in the order the events arrived.
+- The filter now starts with one ProcMon colour read, and with every line that holds DisallowRun or Certificates.
+- The rules that used to leave out the ETW handle events and every ProcMon read are gone, so those show again.
+
 ## 1.3.2
 
 - Bastard 1.3.2 never writes anything outside its own files: the one write test it still had is gone.

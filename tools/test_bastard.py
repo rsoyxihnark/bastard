@@ -356,6 +356,32 @@ class Timeline(unittest.TestCase):
         self.assertFalse(rules.blocks(b.SRC_TRACE, b.INFO, "logman: EventName=FileIo | Type=Read | PID=4"))
         self.assertTrue(hasattr(b.TraceToolSource, "_leave_it_to_etw"))
 
+    def test_the_defaults_are_the_three_the_owner_asked_for(self):
+        rules = b.Exclusions(b.DEFAULT_EXCLUSIONS)
+        self.assertEqual(len(rules.rules), 3)
+        self.assertTrue(rules.blocks(b.SRC_PM, b.INFO,
+                                     "read RegQueryValue HKCU\\SOFTWARE\\Microsoft\\Windows\\DWM"
+                                     "\\ColorPrevalence"))
+        self.assertTrue(rules.blocks(b.SRC_PROBE, b.INFO, "D: DisallowRun policy"))
+        self.assertTrue(rules.blocks(b.SRC_REG, b.CHANGE, "HKLM\\...\\Certificates\\Root added"))
+        self.assertFalse(rules.blocks(b.SRC_PM, b.INFO, "read QueryOpen C:\\x.dll"))
+        self.assertFalse(rules.blocks(b.SRC_ETW, b.INFO, "[Kernel-File] Irp=0xFF | Status=0x0"))
+
+    def test_sort_keys_cover_every_column(self):
+        self.assertEqual(tuple(sorted(b.SORT_KEYS)), tuple(sorted(b.TREE_COLUMNS)))
+        for column in b.TREE_COLUMNS:
+            self.assertIn(column, b.TREE_TITLES)
+            self.assertIn(column, b.TREE_WIDTHS)
+        rows = [event(3.0, b.SRC_REG, b.KIND_REG, b.CHANGE, "banana", "b.exe", 9),
+                event(1.0, b.SRC_FILES, b.KIND_FILE, b.CHANGE, "apple", "a.exe", 2),
+                event(2.0, b.SRC_PM, b.KIND_PROC, b.INFO, "cherry", "c.exe", 5)]
+        self.assertEqual([ev.text for ev in sorted(rows, key=b.SORT_KEYS["event"])],
+                         ["apple", "banana", "cherry"])
+        self.assertEqual([ev.pid for ev in sorted(rows, key=b.SORT_KEYS["pid"], reverse=True)], [9, 5, 2])
+        self.assertEqual([ev.ts for ev in sorted(rows, key=b.SORT_KEYS["time"])], [1.0, 2.0, 3.0])
+        self.assertEqual([ev.proc for ev in sorted(rows, key=b.SORT_KEYS["process"])],
+                         ["a.exe", "b.exe", "c.exe"])
+
     def test_exclusion_from_event(self):
         ev = event(1.0, b.SRC_ETW, b.KIND_FILE, b.INFO,
                    "[Kernel-File] Irp=0xFFFFCA02F50EB3D8 | ExtraInformation=0x18 | Status=0x0")

@@ -25,7 +25,7 @@ import tkinter as tk
 import tkinter.font as tkfont
 from tkinter import filedialog, messagebox, ttk
 
-VERSION = "1.3.2"
+VERSION = "1.4.0"
 
 APP_NAME = "Bastard"
 IS_WIN = os.name == "nt"
@@ -863,8 +863,9 @@ class Store:
 DEFAULT_LOG_MB = 30
 EXCLUSION_PARTS = 4
 DEFAULT_EXCLUSIONS = (
-    "ETW | info | [Kernel-File] | FileName=",
-    "ProcMon | info",
+    "ProcMon | info | RegQueryValue HKCU\\SOFTWARE\\Microsoft\\Windows\\DWM\\ColorPrevalence",
+    "| | DisallowRun",
+    "| | Certificates",
 )
 EXCLUSION_HELP = (
     "One rule per line: source | level | the text it holds | the text that keeps it",
@@ -3527,6 +3528,18 @@ STATE_WORDS = {"running": "running", "done": "done", "starting": "starting", "fi
                "warn": "limited", "failed": "failed", "off": "off", "idle": "idle"}
 LEVEL_COLORS = {INFO: Theme.FG, CHANGE: Theme.YELLOW, WARN: Theme.ORANGE, ERROR: Theme.RED, MARK: Theme.PURPLE}
 SHOW_CHOICES = ("All events", "Changes and problems", "Problems only")
+TREE_COLUMNS = ("time", "source", "kind", "process", "pid", "event")
+TREE_TITLES = {"time": "Time", "source": "Source", "kind": "Kind", "process": "Process", "pid": "PID",
+               "event": "Event"}
+TREE_WIDTHS = {"time": 100, "source": 92, "kind": 74, "process": 170, "pid": 64, "event": 1100}
+SORT_KEYS = {
+    "time": lambda ev: (ev.ts, ev.seq),
+    "source": lambda ev: (ev.source.lower(), ev.ts, ev.seq),
+    "kind": lambda ev: (ev.kind.lower(), ev.ts, ev.seq),
+    "process": lambda ev: ((ev.proc or "").lower(), ev.ts, ev.seq),
+    "pid": lambda ev: (ev.pid or 0, ev.ts, ev.seq),
+    "event": lambda ev: ((ev.text or "").lower(), ev.ts, ev.seq),
+}
 CHIP_SOURCES = (SRC_REG, SRC_FILES, SRC_PROC, SRC_WIN, SRC_LOG, SRC_PM, SRC_WALL, SRC_SYSTEM)
 CHIP_KINDS = (KIND_REG, KIND_FILE, KIND_PROC, KIND_WIN, KIND_NET, KIND_DESK, KIND_LOG, KIND_ETW, KIND_PROBE,
               KIND_SYS)
@@ -3751,6 +3764,8 @@ class App:
         self.hub = Hub(self.rules)
         self.hub.reset(SOURCE_NAMES)
         self.store = Store()
+        self.sort_column = ""
+        self.sort_down = False
         self.session = None
         self.finisher = None
         self.settings = load_settings()
@@ -3906,15 +3921,17 @@ class App:
         self.paned = ttk.PanedWindow(right, orient="vertical")
         self.paned.pack(side="top", fill="both", expand=True, padx=self.px(10), pady=(0, self.px(10)))
         upper = tk.Frame(self.paned, bg=Theme.BG)
-        columns = ("time", "source", "kind", "process", "pid", "event")
-        self.tree = ttk.Treeview(upper, columns=columns, show="headings", selectmode="extended")
-        widths = {"time": 100, "source": 92, "kind": 74, "process": 170, "pid": 64, "event": 1100}
-        titles = {"time": "Time", "source": "Source", "kind": "Kind", "process": "Process", "pid": "PID",
-                  "event": "Event"}
-        for column in columns:
-            self.tree.heading(column, text=titles[column], anchor="w")
-            self.tree.column(column, width=self.px(widths[column]), minwidth=self.px(40),
+        self.tree = ttk.Treeview(upper, columns=TREE_COLUMNS, show="headings", selectmode="extended")
+        for column in TREE_COLUMNS:
+            self.tree.heading(column, text=TREE_TITLES[column], anchor="w",
+                              command=lambda name=column: self._sort_by(name))
+            self.tree.column(column, width=self.px(TREE_WIDTHS[column]), minwidth=self.px(40),
                              anchor="e" if column == "pid" else "w", stretch=column == "event")
+        saved_sort = self.settings.get("sort")
+        if saved_sort in SORT_KEYS:
+            self.sort_column = saved_sort
+            self.sort_down = self.settings.get("sort_down") is True
+        self._paint_headings()
         scroll_y = ttk.Scrollbar(upper, orient="vertical", command=self.tree.yview)
         scroll_x = ttk.Scrollbar(upper, orient="horizontal", command=self.tree.xview)
         self.tree.configure(yscrollcommand=scroll_y.set, xscrollcommand=scroll_x.set)
@@ -4055,6 +4072,27 @@ class App:
             self.rebuild_due = now
         self.rebuild_job = self.root.after(delay, self._rebuild)
 
+    def _paint_headings(self):
+        for column in TREE_COLUMNS:
+            title = TREE_TITLES[column]
+            if column == self.sort_column:
+                title += " v" if self.sort_down else " ^"
+            self.tree.heading(column, text=title)
+
+    def _sort_by(self, column):
+        if column not in SORT_KEYS:
+            return
+        if self.sort_column == column:
+            self.sort_down = not self.sort_down
+        else:
+            self.sort_column = column
+            self.sort_down = False
+        self._paint_headings()
+        if self.rebuild_job is not None:
+            self.root.after_cancel(self.rebuild_job)
+            self.rebuild_job = None
+        self._rebuild()
+
     def _rebuild(self):
         self.rebuild_job = None
         selected = self.tree.selection()
@@ -4062,6 +4100,8 @@ class App:
         matches = [ev for ev in self.store.events() if self._match(ev)]
         self.match_count = len(matches)
         rows = matches[-VIEW_LIMIT:]
+        if self.sort_column:
+            rows = sorted(rows, key=SORT_KEYS[self.sort_column], reverse=self.sort_down)
         children = self.tree.get_children()
         if children:
             self.tree.delete(*children)
@@ -4083,7 +4123,7 @@ class App:
         except queue.Empty:
             pass
         if batch:
-            if self.store.add(batch) and self.rebuild_job is None:
+            if self.store.add(batch) and self.rebuild_job is None and not self.sort_column:
                 self._append(batch)
             else:
                 self._schedule_rebuild(400)
@@ -4427,6 +4467,8 @@ class App:
         data["sources"] = {name: chip.on for name, chip in self.source_chips.items()}
         data["kinds"] = {name: chip.on for name, chip in self.kind_chips.items()}
         data["show"] = self.show_index
+        data["sort"] = self.sort_column
+        data["sort_down"] = self.sort_down
         save_settings(data)
 
     def on_close(self):
