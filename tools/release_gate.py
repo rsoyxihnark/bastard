@@ -82,11 +82,13 @@ def check_message(subject, body, problems):
 
 
 def check_commit(commit, problems):
+    parents = git("log", "-1", "--format=%P", commit).split()
+    if len(parents) > 1:
+        return None
     subject = git("log", "-1", "--format=%s", commit).strip()
     body = git("log", "-1", "--format=%b", commit)
     files = [line for line in git("diff-tree", "--no-commit-id", "--name-only", "-r", "--root", commit).splitlines()
              if line.strip()]
-    parents = git("log", "-1", "--format=%P", commit).split()
     parent = parents[0] if parents else None
     check_message(subject, body, problems)
     match = SUBJECT_RE.match(subject)
@@ -142,15 +144,23 @@ def main(argv):
     head = git("rev-parse", options["--after"].strip()).strip()
     problems = []
     publish = None
+    shipped_at = []
     for commit in commits:
         found = []
         shipped = check_commit(commit, found)
         for problem in found:
             problems.append("%s: %s" % (commit[:8], problem))
-        if shipped and commit != head:
-            problems.append("%s: version %s is not the last commit of this push, so it would never be published" % (
+        if shipped:
+            shipped_at.append((commit, shipped))
+    left = source_version(head)
+    for commit, shipped in shipped_at:
+        if shipped[0] != left:
+            print("note: %s: version %s is not what this push leaves behind, so it is skipped" % (
                 commit[:8], shipped[0]))
-        if shipped and commit == head:
+        elif publish:
+            problems.append("%s: version %s is set by more than one commit in this push" % (
+                commit[:8], shipped[0]))
+        else:
             publish = shipped
     print("Checked %d commit(s)" % len(commits))
     for problem in problems:
