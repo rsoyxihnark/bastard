@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.6.3
+
+- Bastard 1.6.3 reads who may change the desktop without starting PowerShell, and leaves out the rows that say nothing.
+- Fixed the rights on Control Panel Desktop being read by starting PowerShell, which wrote four values of its own.
+- Reading those rights is now a plain read, so a trace is a second quicker and 9000 events lighter.
+- The rows ProcMon writes for opening, closing, asking after and listing a registry key are left out by default.
+- A denied registry open still shows, and so does every value that was written, read or created.
+- ProcMon no longer lists what Bastard and the tools it starts were doing, and the summary says how many it left out.
+- The colour rule now names the path the rows actually carry, so the colour reads are left out again.
+
 ## 1.6.2
 
 - Bastard 1.6.2 leaves every row about Bastard itself out of the timeline, whichever source reported it.

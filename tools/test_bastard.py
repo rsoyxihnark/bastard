@@ -365,9 +365,9 @@ class Timeline(unittest.TestCase):
         self.assertFalse(rules.blocks(b.SRC_TRACE, b.INFO, "logman: EventName=FileIo | Type=Read | PID=4"))
         self.assertTrue(hasattr(b.TraceToolSource, "_leave_it_to_etw"))
 
-    def test_the_defaults_are_the_six_the_owner_asked_for(self):
+    def test_the_defaults_are_the_eleven_the_owner_asked_for(self):
         rules = b.Exclusions(b.DEFAULT_EXCLUSIONS)
-        self.assertEqual(len(rules.rules), 6)
+        self.assertEqual(len(rules.rules), 11)
         self.assertTrue(rules.blocks(b.SRC_PM, b.INFO,
                                      "read RegQueryValue HKCU\\SOFTWARE\\Microsoft\\Windows\\DWM"
                                      "\\ColorPrevalence"))
@@ -675,6 +675,111 @@ class Timeline(unittest.TestCase):
         for source, level, text in wanted:
             self.assertFalse(rules.blocks(source, level, text), text)
         self.assertEqual(rules.blocked, 0)
+
+    def test_registry_rights_names(self):
+        self.assertEqual(b.reg_rights_name(0xF003F), "FullControl")
+        self.assertEqual(b.reg_rights_name(0x10000000), "FullControl")
+        self.assertEqual(b.reg_rights_name(0x2001F), "ReadKey, WriteKey")
+        self.assertEqual(b.reg_rights_name(0x20019), "ReadKey")
+        self.assertEqual(b.reg_rights_name(0x20006), "WriteKey")
+        self.assertEqual(b.reg_rights_name(0x1), "QueryValues")
+        self.assertEqual(b.reg_rights_name(0x4), "0x4")
+
+    def test_acl_lines_read_the_rights_list(self):
+        class Dacl:
+            def __init__(self, aces):
+                self.aces = aces
+
+            def GetAceCount(self):
+                return len(self.aces)
+
+            def GetAce(self, index):
+                return self.aces[index]
+
+        class Fake:
+            SE_REGISTRY_KEY = 4
+            DACL_SECURITY_INFORMATION = 4
+
+            @staticmethod
+            def LookupAccountSid(_server, sid):
+                if sid == "sid-user":
+                    return ("Clementine", "CLEMENTINE", 1)
+                raise OSError("no mapping")
+
+            @staticmethod
+            def ConvertSidToStringSid(sid):
+                return "S-1-15-3-1024"
+
+        saved = b.win32security
+        try:
+            b.win32security = Fake
+            dacl = Dacl([((b.ACE_ALLOWED, 0), 0xF003F, "sid-user"),
+                         ((b.ACE_DENIED, 0), 0x20006, "sid-user"),
+                         ((b.ACE_ALLOWED, 0), 0x20019, "sid-app"),
+                         ((5, 0), 0xF003F, "sid-user")])
+            self.assertEqual(b.acl_lines(dacl), [
+                ("Allow CLEMENTINE\\Clementine FullControl", False),
+                ("Deny CLEMENTINE\\Clementine WriteKey", True),
+                ("Allow S-1-15-3-1024 ReadKey", False),
+            ])
+        finally:
+            b.win32security = saved
+
+    def test_the_acl_probe_asks_for_nothing_it_may_write(self):
+        with io.open(SOURCE, "r", encoding="utf-8") as fh:
+            text = fh.read()
+        self.assertNotIn("Get-Acl", text)
+        self.assertNotIn("REGISTRY_ACL_SCRIPT", text)
+        self.assertIn("DACL_SECURITY_INFORMATION", text)
+        self.assertEqual(text.count("GetNamedSecurityInfo"), 1)
+        self.assertEqual(b.REGISTRY_ACL_OBJECT, "CURRENT_USER\\Control Panel\\Desktop")
+        self.assertEqual(text.lower().count("powershell"), 1)
+
+    def test_our_own_process_tree(self):
+        tree = b.OwnTree(100)
+        tree.note(200, 100)
+        tree.note(300, 200)
+        tree.note(400, 999)
+        tree.note(500, 0)
+        for pid, want in ((100, True), (200, True), (300, True), (400, False), (500, False), (0, False)):
+            self.assertEqual(tree.holds(pid), want, pid)
+        tree.reset(100)
+        self.assertFalse(tree.holds(200))
+        self.assertTrue(tree.holds(100))
+
+    def test_the_digest_skips_our_own_processes(self):
+        saved = b.OWN_TREE
+        try:
+            b.OWN_TREE = b.OwnTree(7)
+            b.OWN_TREE.note(8, 7)
+            digest = b.ProcmonDigest(7, 100)
+            digest.add("t", "Bastard.exe", 7, "RegQueryValue", "HKCU\\a", "SUCCESS")
+            digest.add("t", "powershell.exe", 8, "RegSetValue", "HKCU\\b", "SUCCESS")
+            digest.add("t", "explorer.exe", 9, "RegSetValue", "HKCU\\c", "SUCCESS")
+            self.assertEqual(digest.total, 3)
+            self.assertEqual(digest.ours, 2)
+            self.assertEqual(len(digest.rows), 1)
+            self.assertEqual(digest.reg_writes, 1)
+        finally:
+            b.OWN_TREE = saved
+
+    def test_the_defaults_leave_the_registry_handle_rows_out(self):
+        rules = b.Exclusions(b.DEFAULT_EXCLUSIONS)
+        for op in ("RegOpenKey", "RegCloseKey", "RegQueryKey", "RegEnumKey", "RegEnumValue"):
+            self.assertTrue(rules.blocks(b.SRC_PM, b.INFO, "%s HKCU\\Control Panel\\Desktop" % op), op)
+            self.assertFalse(rules.blocks(b.SRC_PM, b.ERROR, "%s HKLM\\x: ACCESS DENIED" % op), op)
+        for op in ("RegQueryValue", "RegCreateKey", "RegSetInfoKey"):
+            self.assertFalse(rules.blocks(b.SRC_PM, b.INFO, "%s HKCU\\Control Panel\\Desktop" % op), op)
+        self.assertFalse(rules.blocks(b.SRC_PM, b.CHANGE, "RegSetValue HKCU\\Control Panel\\Desktop [Wallpaper]"))
+        self.assertFalse(rules.blocks(b.SRC_REG, b.INFO, "RegOpenKey HKCU\\Control Panel\\Desktop"))
+
+    def test_the_colour_rule_names_the_path_the_rows_carry(self):
+        rules = b.Exclusions(b.DEFAULT_EXCLUSIONS)
+        real = "RegQueryValue HKCU\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize\\ColorPrevalence"
+        self.assertTrue(rules.blocks(b.SRC_PM, b.INFO, real))
+        self.assertTrue(rules.blocks(b.SRC_PM, b.INFO,
+                                     "RegQueryValue HKCU\\SOFTWARE\\Microsoft\\Windows\\DWM\\ColorPrevalence"))
+        self.assertFalse(rules.blocks(b.SRC_PM, b.CHANGE, real.replace("Query", "Set")))
 
     def test_marker_summary(self):
         text, level, _ = b.marker_summary(2, 100.0, [event(99.0), event(107.0)])

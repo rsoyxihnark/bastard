@@ -25,7 +25,7 @@ import tkinter as tk
 import tkinter.font as tkfont
 from tkinter import filedialog, messagebox, ttk
 
-VERSION = "1.6.2"
+VERSION = "1.6.3"
 
 APP_NAME = "Bastard"
 IS_WIN = os.name == "nt"
@@ -73,6 +73,13 @@ if IS_WIN:
     except Exception:
         wmi_module = None
         pythoncom = None
+
+win32security = None
+if IS_WIN:
+    try:
+        import win32security
+    except Exception:
+        win32security = None
 
 INFO = "info"
 CHANGE = "change"
@@ -581,6 +588,32 @@ class ProcessNames:
 PROCESS_NAMES = ProcessNames()
 
 
+class OwnTree:
+    def __init__(self, root):
+        self.lock = threading.Lock()
+        self.pids = {root}
+
+    def reset(self, root):
+        with self.lock:
+            self.pids = {root}
+
+    def note(self, pid, ppid):
+        if not pid or not ppid:
+            return
+        with self.lock:
+            if ppid in self.pids:
+                self.pids.add(pid)
+
+    def holds(self, pid):
+        if not pid:
+            return False
+        with self.lock:
+            return pid in self.pids
+
+
+OWN_TREE = OwnTree(os.getpid())
+
+
 class Event:
     __slots__ = ("ts", "seq", "source", "kind", "level", "pid", "proc", "text", "detail")
 
@@ -877,7 +910,12 @@ LINE_END_EXTRA = len(LOG_NEWLINE) - 1
 PROCMON_ROW_LIMIT = 1000000
 EXCLUSION_PARTS = 4
 DEFAULT_EXCLUSIONS = (
-    "ProcMon | info | RegQueryValue HKCU\\SOFTWARE\\Microsoft\\Windows\\DWM\\ColorPrevalence",
+    "ProcMon | info | ColorPrevalence",
+    "ProcMon | info | RegOpenKey",
+    "ProcMon | info | RegCloseKey",
+    "ProcMon | info | RegQueryKey",
+    "ProcMon | info | RegEnumKey",
+    "ProcMon | info | RegEnumValue",
     "| | DisallowRun",
     "| | Certificates",
     "ETW | info | Kernel-File",
@@ -892,6 +930,40 @@ EXCLUSION_HELP = (
     "Levels: info change warn error marker. System events are never left out.",
     "Delete every line to leave nothing out. An empty list stays empty.",
 )
+
+
+def reg_rights_name(mask):
+    mask = int(mask) & 0xFFFFFFFF
+    if mask & 0x10000000:
+        return "FullControl"
+    for value, name in REG_RIGHT_NAMES:
+        if mask & value == value:
+            return name
+    return "0x%X" % mask
+
+
+def sid_name(sid):
+    try:
+        name, domain, _kind = win32security.LookupAccountSid(None, sid)
+        return "%s\\%s" % (domain, name) if domain else name
+    except Exception:
+        return _safe(lambda: win32security.ConvertSidToStringSid(sid), "") or "unknown account"
+
+
+def acl_lines(dacl):
+    out = []
+    for index in range(dacl.GetAceCount()):
+        try:
+            ace = dacl.GetAce(index)
+        except Exception:
+            continue
+        kind = ace[0][0]
+        if kind not in (ACE_ALLOWED, ACE_DENIED):
+            continue
+        denied = kind == ACE_DENIED
+        word = "Deny" if denied else "Allow"
+        out.append(("%s %s %s" % (word, sid_name(ace[2]), reg_rights_name(ace[1])), denied))
+    return out
 
 
 def log_bytes(text):
@@ -1744,6 +1816,7 @@ class ProcessSource(Source):
         self._emit_exit(pid, name, code, lived, ts)
 
     def _emit_start(self, pid, ppid, name, path, ts, package):
+        OWN_TREE.note(pid, ppid)
         cmd = ""
         if psutil is not None:
             proc = _safe(lambda: psutil.Process(pid))
@@ -2380,6 +2453,7 @@ class ProcmonDigest:
         self.rows = []
         self.total = 0
         self.over = 0
+        self.ours = 0
         self.denied = 0
         self.reg_writes = 0
         self.file_writes = 0
@@ -2390,7 +2464,8 @@ class ProcmonDigest:
 
     def add(self, ts, proc, pid, operation, path, result):
         self.total += 1
-        if pid == self.own_pid:
+        if pid == self.own_pid or OWN_TREE.holds(pid):
+            self.ours += 1
             return
         name = (proc or "").lower()
         if name in PROCMON_SKIP:
@@ -2667,6 +2742,8 @@ class ProcMonSource(Source):
             digest.reads)
         if digest.over:
             summary += ", %d more not listed" % digest.over
+        if digest.ours:
+            summary += ", %d of our own left out" % digest.ours
         self.note(summary, INFO, "Capture file: %s\nRead: %s" % (self.pml, info))
         for number, start in list(self.session.markers):
             found = sum(1 for row in rows if start < row[0] <= start + MARKER_WINDOW)
@@ -3000,11 +3077,15 @@ PROBE_DISALLOW = ("photos.exe", "runtimebroker.exe", "systemsettings.exe", "back
                   "applicationframehost.exe", "winrt.runtime.dll")
 PROBE_IFEO = ("RuntimeBroker.exe", "SystemSettings.exe", "Photos.exe", "ApplicationFrameHost.exe")
 PROBE_SHELL_FOLDERS = ("Desktop", "AppData", "Local AppData", "My Pictures")
-REGISTRY_ACL_SCRIPT = (
-    "$ErrorActionPreference = 'SilentlyContinue'; ",
-    "(Get-Acl 'HKCU:\\Control Panel\\Desktop').Access | ForEach-Object { ",
-    "$_.AccessControlType.ToString() + ' ' + $_.IdentityReference.ToString() + ",
-    "' ' + $_.RegistryRights.ToString() }",
+REGISTRY_ACL_OBJECT = "CURRENT_USER\\Control Panel\\Desktop"
+ACE_ALLOWED = 0
+ACE_DENIED = 1
+REG_RIGHT_NAMES = (
+    (0xF003F, "FullControl"),
+    (0x2001F, "ReadKey, WriteKey"),
+    (0x20019, "ReadKey"),
+    (0x20006, "WriteKey"),
+    (0x00001, "QueryValues"),
 )
 PROBE_SHELL_VERBS = (
     ("HKCR", "SystemFileAssociations\\.jpg\\shell\\setaswallpaper"),
@@ -3226,18 +3307,23 @@ class ProbeSource(Source):
 
     def _acl(self):
         self._say("I: who may change Control Panel Desktop")
-        code, out = run_text(["powershell", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
-                              "-WindowStyle", "Hidden", "-Command", "".join(REGISTRY_ACL_SCRIPT)], 30)
-        if code is None:
-            self._say("the rights on Control Panel Desktop could not be read: %s" % out, WARN)
+        if win32security is None:
+            self._say("the rights on Control Panel Desktop could not be read: pywin32 is missing", WARN)
+            return
+        try:
+            holder = win32security.GetNamedSecurityInfo(REGISTRY_ACL_OBJECT, win32security.SE_REGISTRY_KEY,
+                                                        win32security.DACL_SECURITY_INFORMATION)
+            dacl = holder.GetSecurityDescriptorDacl()
+        except Exception as exc:
+            self._say("the rights on Control Panel Desktop could not be read: %s" % one_line(exc, 160), WARN)
+            return
+        if dacl is None:
+            self._say("Control Panel\\Desktop carries no rights list of its own", WARN)
             return
         found = 0
-        for line in out.splitlines():
-            line = line.strip()
-            if not line:
-                continue
+        for line, denied in acl_lines(dacl):
             found += 1
-            self._say("Control Panel\\Desktop: " + line, ERROR if line.lower().startswith("deny") else INFO)
+            self._say("Control Panel\\Desktop: " + line, ERROR if denied else INFO)
         if not found:
             self._say("no rights came back for Control Panel\\Desktop", WARN)
 
@@ -3433,6 +3519,7 @@ SOURCE_NAMES = [kind.name for kind in SOURCE_TYPES]
 
 class Session:
     def __init__(self, hub, options):
+        OWN_TREE.reset(os.getpid())
         self.hub = hub
         self.options = options
         self.stop_event = threading.Event()
