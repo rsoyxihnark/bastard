@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.4.2
+
+- Bastard 1.4.2 closes ProcMon the quick way first, so the finish is no longer held up at the end of a trace.
+- Fixed the finish taking longer than it used to, because closing ProcMon started a second copy of ProcMon.
+- ProcMon is closed the plain way first now, and only asked to stop through its own command when that is ignored.
+
 ## 1.4.1
 
 - Bastard 1.4.1 keeps the trace log under the limit it was given, and lets the ProcMon row count be set.

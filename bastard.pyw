@@ -25,7 +25,7 @@ import tkinter as tk
 import tkinter.font as tkfont
 from tkinter import filedialog, messagebox, ttk
 
-VERSION = "1.4.1"
+VERSION = "1.4.2"
 
 APP_NAME = "Bastard"
 IS_WIN = os.name == "nt"
@@ -2522,13 +2522,13 @@ class ProcMonSource(Source):
     def _close(self, abort):
         if not self._procmon_pids():
             return True
-        self.status("finishing", "asking ProcMon to stop")
-        _safe(lambda: run_hidden([self.exe, "/AcceptEula", "/Terminate"], 25))
-        if self._wait_gone(3.0 if abort else 8.0):
-            return True
         for pid in self._procmon_pids():
             _safe(lambda: run_hidden(["taskkill", "/PID", str(pid), "/T"], 15))
         if self._wait_gone(3.0 if abort else 12.0):
+            return True
+        self.status("finishing", "asking ProcMon to stop")
+        _safe(lambda: run_hidden([self.exe, "/AcceptEula", "/Terminate"], 25))
+        if self._wait_gone(3.0 if abort else 8.0):
             return True
         for pid in self._procmon_pids():
             _safe(lambda: run_hidden(["taskkill", "/F", "/PID", str(pid), "/T"], 15))
