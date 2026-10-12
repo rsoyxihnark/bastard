@@ -56,11 +56,25 @@ of trusting a reading of the code.
 
 ## The program itself
 
-`bastard.pyw` is a monitor: it watches and records, and never changes a
-setting, an app or Windows. The archive under `OldDevelopments/` has
-active repairs (shell verb restore, Photos re-register, a wallpaper test
-write); they were left out on purpose. Ask before adding anything that
-writes, even an idempotent write, because it softens that promise.
+`bastard.pyw` is a monitor and it writes NOTHING outside its own files.
+Reads of every kind are wanted; a write of any kind is not, not even zero
+bytes, not even the same value written back. The owner settled this in
+1.3.2: do not propose it again.
+
+Its own files are the exception and are expected: the trace log, the
+`Exclusions.ini`, `settings.json`, the exports, and the capture files
+logman and ProcMon write into `TRACE_DIR`.
+
+So: never `winreg.SetValue`, `CreateKey`, `DeleteKey` or `DeleteValue`,
+never `KEY_SET_VALUE`, `KEY_WRITE` or `KEY_ALL_ACCESS`, never
+`SPI_SETDESKWALLPAPER` or any `SPIF_` flag, never a binary or append open
+on a file of Windows. `test_the_program_never_writes_to_windows` holds the
+line; keep its list current rather than working around it.
+
+To answer whether something is writable, read its rights instead: `icacls`
+for a file path, and PowerShell `Get-Acl` for a registry path, because
+`icacls` cannot read a registry path at all. The archive under
+`OldDevelopments/` has active repairs and write probes; they stay out.
 
 ETW, ProcMon and Trace Tools are the loud sources: unfiltered, a 32 second
 trace produces over a million events from them while the signal worth

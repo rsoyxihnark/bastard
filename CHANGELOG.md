@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.3.2
+
+- Bastard 1.3.2 never writes anything outside its own files: the one write test it still had is gone.
+- The TranscodedWallpaper probe no longer opens the file to write, and reports its size, last write and rights instead.
+- Who may change the desktop key is read with Get-Acl now, because icacls cannot read a registry path at all.
+- Nothing in Bastard touches a registry value, a setting or a file of Windows any more, in any way.
+
 ## 1.3.1
 
 - Bastard 1.3.1 keeps an empty filter empty, and lets logman and WPR sleep while the ETW source is reading.

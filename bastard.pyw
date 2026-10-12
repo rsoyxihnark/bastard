@@ -25,7 +25,7 @@ import tkinter as tk
 import tkinter.font as tkfont
 from tkinter import filedialog, messagebox, ttk
 
-VERSION = "1.3.1"
+VERSION = "1.3.2"
 
 APP_NAME = "Bastard"
 IS_WIN = os.name == "nt"
@@ -2942,6 +2942,12 @@ PROBE_DISALLOW = ("photos.exe", "runtimebroker.exe", "systemsettings.exe", "back
                   "applicationframehost.exe", "winrt.runtime.dll")
 PROBE_IFEO = ("RuntimeBroker.exe", "SystemSettings.exe", "Photos.exe", "ApplicationFrameHost.exe")
 PROBE_SHELL_FOLDERS = ("Desktop", "AppData", "Local AppData", "My Pictures")
+REGISTRY_ACL_SCRIPT = (
+    "$ErrorActionPreference = 'SilentlyContinue'; ",
+    "(Get-Acl 'HKCU:\\Control Panel\\Desktop').Access | ForEach-Object { ",
+    "$_.AccessControlType.ToString() + ' ' + $_.IdentityReference.ToString() + ",
+    "' ' + $_.RegistryRights.ToString() }",
+)
 PROBE_SHELL_VERBS = (
     ("HKCR", "SystemFileAssociations\\.jpg\\shell\\setaswallpaper"),
     ("HKCR", "SystemFileAssociations\\.jpeg\\shell\\setaswallpaper"),
@@ -2984,7 +2990,7 @@ class ProbeSource(Source):
 
     def _run(self):
         probes = (self._policy, self._appprivacy, self._consentstore, self._disallowrun, self._ifeo,
-                  self._shell_verbs, self._winrt, self._transcode_write, self._acl, self._services,
+                  self._shell_verbs, self._winrt, self._transcoded, self._acl, self._services,
                   self._explorer_hints, self._shell_folders)
         for probe in probes:
             if self.stopping():
@@ -3130,33 +3136,52 @@ class ProbeSource(Source):
             level = ERROR if "IsSupported=False" in line else (WARN if line.startswith("ERR") else INFO)
             self._say(line, level)
 
-    def _transcode_write(self):
-        self._say("H: TranscodedWallpaper write test")
+    def _rights(self, label, path):
+        code, out = run_text(["icacls", path], 20)
+        if code is None:
+            self._say("%s: the rights could not be read: %s" % (label, out), WARN)
+            return
+        for line in out.splitlines():
+            line = line.strip()
+            if not line or line.lower().startswith("successfully processed"):
+                continue
+            self._say("%s: %s" % (label, line), ERROR if "DENY" in line.upper() else INFO)
+
+    def _transcoded(self):
+        self._say("H: TranscodedWallpaper")
         path = os.path.join(os.environ.get("APPDATA", ""), "Microsoft", "Windows", "Themes", "TranscodedWallpaper")
         if not os.path.isfile(path):
             self._say("TranscodedWallpaper is not there: %s" % path, WARN)
             return
         try:
-            with open(path, "ab") as handle:
-                handle.write(b"")
-            self._say("TranscodedWallpaper is writable", INFO, detail=path)
-        except PermissionError as exc:
-            self._say("TranscodedWallpaper write denied: %s" % one_line(exc, 160), ERROR, detail=path)
-        except Exception as exc:
-            self._say("TranscodedWallpaper write test: %s" % one_line(exc, 160), WARN, detail=path)
+            size = os.path.getsize(path)
+            written = stamp(os.path.getmtime(path))
+            marked = not os.access(path, os.W_OK)
+        except OSError as exc:
+            self._say("TranscodedWallpaper could not be read: %s" % one_line(exc, 160), WARN, detail=path)
+            return
+        self._say("TranscodedWallpaper holds %s and was last written %s" % (plural(size, "byte"), written),
+                  INFO, detail=path)
+        if marked:
+            self._say("TranscodedWallpaper is marked read only", ERROR, detail=path)
+        self._rights("TranscodedWallpaper", path)
 
     def _acl(self):
-        self._say("I: ACL of Control Panel Desktop")
-        code, out = run_text(["icacls", "HKCU\\Control Panel\\Desktop"], 20)
+        self._say("I: who may change Control Panel Desktop")
+        code, out = run_text(["powershell", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+                              "-WindowStyle", "Hidden", "-Command", "".join(REGISTRY_ACL_SCRIPT)], 30)
         if code is None:
-            self._say("icacls failed: %s" % out, WARN)
+            self._say("the rights on Control Panel Desktop could not be read: %s" % out, WARN)
             return
+        found = 0
         for line in out.splitlines():
             line = line.strip()
             if not line:
                 continue
-            level = ERROR if "DENY" in line.upper() else INFO
-            self._say("icacls: " + line, level)
+            found += 1
+            self._say("Control Panel\\Desktop: " + line, ERROR if line.lower().startswith("deny") else INFO)
+        if not found:
+            self._say("no rights came back for Control Panel\\Desktop", WARN)
 
     def _services(self):
         self._say("J: services")

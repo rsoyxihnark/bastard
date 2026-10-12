@@ -1,5 +1,6 @@
 import importlib.machinery
 import importlib.util
+import io
 import json
 import os
 import shutil
@@ -288,6 +289,16 @@ class Timeline(unittest.TestCase):
         self.assertIn(write, picked)
         self.assertLessEqual(len(picked), 30)
         self.assertEqual([ev.key() for ev in picked], sorted(ev.key() for ev in picked))
+
+    def test_the_program_never_writes_to_windows(self):
+        with io.open(SOURCE, "r", encoding="utf-8") as fh:
+            text = fh.read()
+        for banned in ("winreg.SetValue", "winreg.CreateKey", "winreg.DeleteKey", "winreg.DeleteValue",
+                       "winreg.SaveKey", "KEY_SET_VALUE", "KEY_WRITE", "KEY_ALL_ACCESS",
+                       "SPI_SETDESKWALLPAPER", "SPIF_", '"ab"', '"wb"', '"r+"', "startfile"):
+            self.assertNotIn(banned, text, banned)
+        self.assertFalse(hasattr(b.ProbeSource, "_transcode_write"))
+        self.assertTrue(hasattr(b.ProbeSource, "_transcoded"))
 
     def test_exclusion_rules(self):
         rules = b.Exclusions(["ETW | info | [Kernel-File] | FileName=", "Trace Tools | info", "ProcMon | info"])
