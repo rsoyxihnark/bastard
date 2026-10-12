@@ -97,7 +97,7 @@ def check_commit(commit, problems):
     version = source_version(commit)
     before = source_version(parent) if parent else None
     if match.group(1) == "no release":
-        if version != before:
+        if parent is not None and version != before:
             problems.append("a [no release] commit changes the version from %s to %s" % (before, version))
         if "CHANGELOG.md" not in files:
             program = [path for path in files if not (path.startswith(EXEMPT_PREFIXES) or path in EXEMPT_FILES)]
