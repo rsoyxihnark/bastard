@@ -241,10 +241,42 @@ class Timeline(unittest.TestCase):
         store = b.Store(limit=5)
         self.assertTrue(store.add([event(1.0), event(2.0)]))
         self.assertFalse(store.add([event(1.5)]))
-        self.assertEqual([ev.ts for ev in store.items], [1.0, 1.5, 2.0])
+        self.assertEqual([ev.ts for ev in store.events()], [1.0, 1.5, 2.0])
         self.assertEqual([ev.ts for ev in store.window(1.0, 2.0)], [1.5, 2.0])
         store.add([event(3.0), event(4.0), event(5.0)])
         self.assertEqual(store.dropped, 1)
+
+    def test_store_sorts_only_when_it_is_read(self):
+        store = b.Store(limit=10)
+        self.assertFalse(store.add([event(3.0), event(1.0)]))
+        self.assertTrue(store.unsorted)
+        self.assertEqual([ev.ts for ev in store.events()], [1.0, 3.0])
+        self.assertFalse(store.unsorted)
+
+    def test_store_keeps_room_for_the_quiet_sources(self):
+        store = b.Store(limit=100)
+        store.add([event(index / 500.0, b.SRC_ETW, b.KIND_ETW, b.INFO) for index in range(500)])
+        store.add([event(float(index) + 1.0, b.SRC_REG, b.KIND_REG, b.CHANGE) for index in range(15)])
+        store.add([event(20.0, b.SRC_PM, b.KIND_REG, b.CHANGE, "BastardSelfTest [A] set")])
+        kept = {}
+        for ev in store.events():
+            kept[ev.source] = kept.get(ev.source, 0) + 1
+        self.assertEqual(kept[b.SRC_REG], 15)
+        self.assertEqual(kept[b.SRC_PM], 1)
+        self.assertEqual(kept[b.SRC_ETW], 80)
+        self.assertEqual(store.dropped, 420)
+
+    def test_sample_events_keeps_the_quiet_sources(self):
+        reads = [event(index / 400.0, b.SRC_PM, b.KIND_FILE, b.INFO) for index in range(400)]
+        quiet = [event(float(index) + 1.0, b.SRC_REG, b.KIND_REG, b.CHANGE) for index in range(5)]
+        write = event(20.0, b.SRC_PM, b.KIND_REG, b.CHANGE, "BastardSelfTest [A] set")
+        events = sorted(reads + quiet + [write], key=b.Event.key)
+        self.assertEqual([ev for ev in events[:30] if ev.source != b.SRC_PM], [])
+        picked = b.sample_events(events, 30)
+        self.assertEqual(len([ev for ev in picked if ev.source == b.SRC_REG]), 5)
+        self.assertIn(write, picked)
+        self.assertLessEqual(len(picked), 30)
+        self.assertEqual([ev.key() for ev in picked], sorted(ev.key() for ev in picked))
 
     def test_marker_summary(self):
         text, level, _ = b.marker_summary(2, 100.0, [event(99.0), event(107.0)])
@@ -341,7 +373,7 @@ class Window(unittest.TestCase):
         app._drain()
         app.root.after_cancel(app.rebuild_job)
         app._rebuild()
-        self.assertEqual(app.tree.get_children()[0], str(app.store.items[0].seq))
+        self.assertEqual(app.tree.get_children()[0], str(app.store.events()[0].seq))
         app.show_box.current(2)
         app._filters_changed()
         app._rebuild()
