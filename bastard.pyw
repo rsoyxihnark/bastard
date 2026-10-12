@@ -25,7 +25,7 @@ import tkinter as tk
 import tkinter.font as tkfont
 from tkinter import filedialog, messagebox, ttk
 
-VERSION = "1.6.0"
+VERSION = "1.6.1"
 
 APP_NAME = "Bastard"
 IS_WIN = os.name == "nt"
@@ -882,8 +882,7 @@ DEFAULT_EXCLUSIONS = (
     "| | Certificates",
     "ETW | info | Kernel-File",
     "ProcMon | | chrome.exe",
-    "ProcMon | | Bastard",
-    "ETW | | Bastard",
+    "| | Bastard",
 )
 EXCLUSION_HELP = (
     "One rule per line: source | level | the text it holds | the text that keeps it",

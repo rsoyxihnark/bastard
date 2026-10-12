@@ -321,7 +321,7 @@ class Timeline(unittest.TestCase):
             (b.SRC_FILES, b.CHANGE, "File created: x.txt"),
             (b.SRC_FILES, b.CHANGE, "renamed x.txt to y.txt"),
             (b.SRC_FILES, b.CHANGE, "deleted y.txt"),
-            (b.SRC_PROC, b.INFO, "Started python.exe (PID 7) by Bastard.exe (PID 1)"),
+            (b.SRC_PROC, b.INFO, "Started python.exe (PID 7) by python.exe (PID 1)"),
             (b.SRC_PROC, b.INFO, "Exited cmd.exe (PID 9) with exit code 7 after 0.0 s"),
             (b.SRC_REG, b.CHANGE, "HKCU\\Software\\TraceSelfTest [A] 1 (0x1) -> 2 (0x2)"),
             (b.SRC_REG, b.CHANGE, "HKCU\\Software\\TraceSelfTest [B] added"),
@@ -357,9 +357,9 @@ class Timeline(unittest.TestCase):
         self.assertFalse(rules.blocks(b.SRC_TRACE, b.INFO, "logman: EventName=FileIo | Type=Read | PID=4"))
         self.assertTrue(hasattr(b.TraceToolSource, "_leave_it_to_etw"))
 
-    def test_the_defaults_are_the_seven_the_owner_asked_for(self):
+    def test_the_defaults_are_the_six_the_owner_asked_for(self):
         rules = b.Exclusions(b.DEFAULT_EXCLUSIONS)
-        self.assertEqual(len(rules.rules), 7)
+        self.assertEqual(len(rules.rules), 6)
         self.assertTrue(rules.blocks(b.SRC_PM, b.INFO,
                                      "read RegQueryValue HKCU\\SOFTWARE\\Microsoft\\Windows\\DWM"
                                      "\\ColorPrevalence"))
@@ -638,12 +638,20 @@ class Timeline(unittest.TestCase):
 
     def test_the_defaults_leave_our_own_rows_out(self):
         rules = b.Exclusions(b.DEFAULT_EXCLUSIONS)
+        self.assertTrue(rules.blocks(b.SRC_PROC, b.INFO, "Started powershell.exe (PID 9) by Bastard.exe (PID 1)"))
         self.assertTrue(rules.blocks(b.SRC_PM, b.INFO, "WriteFile C:\\Tools\\Bastard_20261012.log"))
         self.assertTrue(rules.blocks(b.SRC_PM, b.CHANGE, "QueryOpen C:\\x", "Bastard.exe"))
         self.assertTrue(rules.blocks(b.SRC_ETW, b.CHANGE, "[Kernel-Registry] x", "", "FileName=Bastard_1.log"))
-        self.assertFalse(rules.blocks(b.SRC_PROC, b.INFO, "Started python.exe (PID 7) by Bastard.exe (PID 1)"))
-        self.assertFalse(rules.blocks(b.SRC_SYSTEM, b.INFO, "Bastard 1.6.0 started"))
-        self.assertFalse(rules.blocks(b.SRC_LOG, b.WARN, "Application: Bastard crashed"))
+        self.assertTrue(rules.blocks(b.SRC_FILES, b.CHANGE, "File changed: Bastard_20261012.log"))
+        self.assertFalse(rules.blocks(b.SRC_PROC, b.INFO, "Started python.exe (PID 7) by python.exe (PID 1)"))
+        self.assertFalse(rules.blocks(b.SRC_PROC, b.INFO, "Started powershell.exe (PID 9) by explorer.exe (PID 2)"))
+
+    def test_a_default_rule_never_silences_our_own_notices(self):
+        rules = b.Exclusions(b.DEFAULT_EXCLUSIONS)
+        for text in ("Bastard 1.6.1 started", "Trace started", "Trace stopped after 32.0 s",
+                     "ProcMon: read 1000 events", "Marker 1: 4 events in the 6 seconds after it"):
+            self.assertFalse(rules.blocks(b.SRC_SYSTEM, b.INFO, text), text)
+        self.assertEqual(rules.blocked, 0)
 
     def test_marker_summary(self):
         text, level, _ = b.marker_summary(2, 100.0, [event(99.0), event(107.0)])
