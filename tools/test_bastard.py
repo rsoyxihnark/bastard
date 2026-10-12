@@ -177,20 +177,19 @@ class ProcMon(unittest.TestCase):
         digest.add(20.0, "app.exe", 8, "ReadFile", "C:\\data.bin", "SUCCESS")
         rows = digest.ordered()
         self.assertEqual(digest.total, 11)
-        self.assertEqual([row[0] for row in rows], [10.0, 11.0, 12.0, 17.0, 19.0])
-        self.assertEqual([row[3] for row in rows], ["RegSetValue", "RegQueryValue", "RegOpenKey", "WriteFile", "ReadFile"])
+        self.assertEqual([row[0] for row in rows], [10.0, 11.0, 12.0, 13.0, 14.0, 17.0, 18.0, 19.0, 20.0])
         self.assertEqual(rows[2][5], "ACCESS DENIED")
         self.assertEqual(rows[2][7], b.ERROR)
         self.assertEqual(rows[0][6], b.KIND_REG)
+        network = next(row for row in rows if row[0] == 18.0)
+        self.assertEqual(network[6], b.KIND_NET)
         self.assertEqual((digest.denied, digest.reg_writes, digest.file_writes, digest.reads, digest.over),
-                         (1, 1, 1, 2, 0))
+                         (2, 1, 2, 4, 0))
 
-    def test_scope(self):
-        self.assertTrue(b.procmon_in_scope("C:\\Users\\me\\AppData\\Roaming\\Microsoft\\Windows\\Themes\\x"))
-        self.assertTrue(b.procmon_in_scope("HKCU\\Control Panel\\Desktop"))
-        self.assertTrue(b.procmon_in_scope("C:\\lockscreen.jpg"))
-        self.assertFalse(b.procmon_in_scope("C:\\Windows\\System32\\kernel32.dll"))
-        self.assertFalse(b.procmon_in_scope(""))
+    def test_kind_network(self):
+        self.assertEqual(b.procmon_kind("TCP Send"), b.KIND_NET)
+        self.assertEqual(b.procmon_kind("RegQueryValue"), b.KIND_REG)
+        self.assertEqual(b.procmon_kind("ReadFile"), b.KIND_FILE)
 
     def test_time_of_day(self):
         day = time.mktime((2026, 10, 12, 13, 0, 0, 0, 0, -1))

@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.2.0
+
+- Bastard 1.2.0 lets the whole river through: ETW, ProcMon and Trace Tools now list every event, not only the personalization ones.
+- ETW now lists every registry and file event it parses, whatever key or path it touches.
+- ProcMon now lists every operation it captures, reads and lookups on every path, not only the personalization ones.
+- ProcMon now also lists its network operations, next to the file, registry and process ones.
+- Trace Tools now lists every row logman or WPR captured, not only the personalization ones.
+- The timeline now holds up to a million events in memory, and the log on the Desktop still keeps the whole run.
+- The kind filter has new Network, Trace and Probe buttons, so you can hide or show each stream yourself.
+- Bastard still leaves out only its own work and the ProcMon helper, so the trace does not feed on itself.
+
 ## 1.1.0
 
 - Bastard 1.1.0 reads every channel the earlier versions read and shows all of it unfiltered, so you can sift the noise yourself.

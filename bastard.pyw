@@ -24,7 +24,7 @@ import tkinter as tk
 import tkinter.font as tkfont
 from tkinter import filedialog, messagebox, ttk
 
-VERSION = "1.1.0"
+VERSION = "1.2.0"
 
 APP_NAME = "Bastard"
 IS_WIN = os.name == "nt"
@@ -103,13 +103,14 @@ KIND_SYS = "System"
 KIND_MARK = "Marker"
 KIND_PROBE = "Probe"
 KIND_ETW = "Trace"
+KIND_NET = "Network"
 
 CREATE_NO_WINDOW = 0x08000000
 FILETIME_EPOCH = 116444736000000000
 MARKER_WINDOW = 6
 MARKER_DELAY = 8.5
 VIEW_LIMIT = 20000
-STORE_LIMIT = 500000
+STORE_LIMIT = 1000000
 INTERNAL_ERRORS = []
 
 FOLDERID_DESKTOP = "B4BFCC3A-DB2C-424C-B029-7FE99A87C641"
@@ -2131,17 +2132,8 @@ PROCMON_FILE_WRITES = frozenset(("WriteFile", "SetDispositionInformationFile", "
                                  "SetRenameInformationExBypassAccessCheck", "SetSecurityFile"))
 PROCMON_PROCESS_OPS = frozenset(("Process Create", "Process Exit", "Process Start", "Thread Create", "Thread Exit",
                                  "Load Image", "Process Statistics", "Process Profiling", "Thread Profiling"))
-PROCMON_SCOPE = ("wallpaper", "transcoded", "\\themes\\", "\\themes.", "\\theme\\", ".theme", ".deskthemepack",
-                 "lock screen", "lockscreen", "personaliz", "photos", "spotlight", "slideshow", "assetmanager",
-                 "control panel\\desktop", "\\dwm", "logonui", "\\background", "accent", "\\desktop]",
-                 "roamedtiledata", "cachedfiles", "microsoft.windows.photos")
-PROCMON_ROW_LIMIT = 200000
+PROCMON_ROW_LIMIT = 1000000
 PROCMON_KEEP = 5
-
-
-def procmon_in_scope(path):
-    low = (path or "").lower()
-    return any(mark in low for mark in PROCMON_SCOPE)
 TIME_OF_DAY_RE = re.compile(r"(\d{1,2}):(\d{2}):(\d{2})(?:[.,](\d+))?\s*([AaPp])?")
 
 
@@ -2159,6 +2151,8 @@ def find_procmon():
 def procmon_kind(operation):
     if operation.startswith("Reg"):
         return KIND_REG
+    if operation.startswith("TCP") or operation.startswith("UDP"):
+        return KIND_NET
     if operation in PROCMON_PROCESS_OPS:
         return KIND_PROC
     return KIND_FILE
@@ -2181,21 +2175,17 @@ class ProcmonDigest:
         if pid == self.own_pid:
             return
         name = (proc or "").lower()
-        if name in PROCMON_SKIP or operation.startswith("TCP") or operation.startswith("UDP"):
+        if name in PROCMON_SKIP:
             return
+        kind = procmon_kind(operation)
         if result in PROCMON_DENIED:
-            kind, level, tag = procmon_kind(operation), ERROR, "denied"
+            level, tag = ERROR, "denied"
         elif operation in PROCMON_REG_WRITES:
-            kind, level, tag = KIND_REG, CHANGE, "registry"
+            level, tag = CHANGE, "registry"
         elif operation in PROCMON_FILE_WRITES:
-            low = path.lower()
-            if name == "system" or low.startswith("c:\\$") or low.endswith("\\pagefile.sys"):
-                return
-            kind, level, tag = KIND_FILE, CHANGE, "file"
-        elif procmon_in_scope(path):
-            kind, level, tag = procmon_kind(operation), INFO, "read"
+            level, tag = CHANGE, "file"
         else:
-            return
+            level, tag = INFO, "read"
         if len(self.rows) >= self.limit:
             self.over += 1
             return
@@ -2371,7 +2361,7 @@ class ProcMonSource(Source):
                         last = self._progress(index, total, last)
                     ev = reader[index]
                     group = ev.event_class.name
-                    if group in ("Profiling", "Network"):
+                    if group == "Profiling":
                         digest.total += 1
                         continue
                     operation = getattr(ev.operation, "csv_name", None) or ev.operation.name
@@ -2518,8 +2508,6 @@ ETW_RAW_PROVIDERS = (
     ("Themes", "{7B67BEC2-6E2F-4A68-B7E4-9D3E9A4C4C8F}", False),
 )
 ETW_GUID_NAMES = {guid.upper(): name for name, guid, _kernel in ETW_RAW_PROVIDERS}
-ETW_SCOPE = ("wallpaper", "theme", "transcoded", "lock screen", "lockscreen", "personaliz", "photos", "spotlight",
-             "slideshow", "background", "\\dwm", "accent", "logonui", "control panel\\desktop", "assetmanager")
 ETW_WRITE_MARKS = ("setvalue", "deletevalue", "deletekey", "createkey", "renamekey", "setkeysecurity", "writefile",
                    "setinformation", "setdisposition", "setrename", "deletefile", "setsecurity")
 ETW_SKIP_KEYS = frozenset(("EventHeader", "Descriptor", "ProviderId", "ProviderName", "Provider Name", "Task Name"))
@@ -2532,6 +2520,7 @@ class EtwRawSource(Source):
     def start(self):
         self.job = None
         self.count = 0
+        self.own_pid = os.getpid()
         if not IS_WIN:
             self.status("off", "Windows only")
             return
@@ -2590,6 +2579,8 @@ class EtwRawSource(Source):
             if abs(ts - time.time()) > 86400:
                 ts = time.time()
             pid = as_int(header.get("ProcessId"), 0) or as_int(data.get("ProcessId"), 0)
+            if pid and pid == self.own_pid:
+                return
             provider = data.get("ProviderName") or data.get("Provider Name") or ""
             if not provider:
                 provider = ETW_GUID_NAMES.get(str(header.get("ProviderId") or "").upper(), "")
@@ -2604,9 +2595,6 @@ class EtwRawSource(Source):
             blob = (str(provider) + " " + detail).lower()
             denied = "denied" in blob or "0x8007" in blob or "0xc0000022" in blob
             write = any(mark in blob for mark in ETW_WRITE_MARKS)
-            scope = any(mark in blob for mark in ETW_SCOPE)
-            if not (denied or write or scope):
-                return
             level = ERROR if denied else (CHANGE if write else INFO)
             label = provider or "ETW"
             low = label.lower()
@@ -3018,7 +3006,6 @@ class ProbeSource(Source):
 
 
 TRACE_PROVIDER_LINE = "{%s} 0xffffffffffffffff 5"
-TRACE_SCOPE = ETW_SCOPE
 
 
 class TraceToolSource(Source):
@@ -3116,8 +3103,6 @@ class TraceToolSource(Source):
                 line = " | ".join("%s=%s" % (k, v) for k, v in row.items() if v and str(v).strip())
                 low = line.lower()
                 denied = "denied" in low or "0x8007" in low
-                if not (denied or any(mark in low for mark in TRACE_SCOPE)):
-                    continue
                 listed += 1
                 if listed > PROCMON_ROW_LIMIT:
                     break
@@ -3287,7 +3272,8 @@ STATE_WORDS = {"running": "running", "starting": "starting", "finishing": "finis
 LEVEL_COLORS = {INFO: Theme.FG, CHANGE: Theme.YELLOW, WARN: Theme.ORANGE, ERROR: Theme.RED, MARK: Theme.PURPLE}
 SHOW_CHOICES = ("All events", "Changes and problems", "Problems only")
 CHIP_SOURCES = (SRC_REG, SRC_FILES, SRC_PROC, SRC_WIN, SRC_LOG, SRC_PM, SRC_WALL, SRC_SYSTEM)
-CHIP_KINDS = (KIND_REG, KIND_FILE, KIND_PROC, KIND_WIN, KIND_DESK, KIND_LOG, KIND_SYS)
+CHIP_KINDS = (KIND_REG, KIND_FILE, KIND_PROC, KIND_WIN, KIND_NET, KIND_DESK, KIND_LOG, KIND_ETW, KIND_PROBE,
+              KIND_SYS)
 DETAIL_HINT = ("Start (F5) begins a trace. Do what you want to watch, press Marker (F8) at the moment you try it, "
                "then Stop (Shift+F5).\n\nSelect an event to see its details here.")
 
