@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.2.1
+
+- Bastard 1.2.1 keeps the quiet sources in the timeline when ETW, ProcMon and Trace Tools flood it.
+- The reads from the loud sources can fill at most four fifths of the timeline, so the other events always have room.
+- Denials and registry and file writes now keep their place in the timeline, however many reads arrive.
+- Before this a flood could fill the timeline, and every later event, markers and Trace stopped included, was only in the log.
+- A trace with a million events now finishes in seconds instead of minutes, because the timeline is put in time order when it is read.
+- The self-test now reports every quiet event with a sample of each loud stream, instead of the first events by time.
+- The log on the Desktop still keeps the whole run, as it did before.
+
 ## 1.2.0
 
 - Bastard 1.2.0 lets the whole river through: ETW, ProcMon and Trace Tools now list every event, not only the personalization ones.
