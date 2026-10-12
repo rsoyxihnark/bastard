@@ -24,7 +24,7 @@ import tkinter as tk
 import tkinter.font as tkfont
 from tkinter import filedialog, messagebox, ttk
 
-VERSION = "1.2.1"
+VERSION = "1.2.2"
 
 APP_NAME = "Bastard"
 IS_WIN = os.name == "nt"
