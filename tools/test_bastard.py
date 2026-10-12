@@ -231,6 +231,17 @@ class NewSources(unittest.TestCase):
             self.assertIn(wanted, names)
         self.assertEqual(b.ETW_GUID_NAMES["{70EB4F03-C1DE-4F73-A051-33D13D541355}"], "Kernel-Registry")
 
+    def test_policy_and_shell_folder_probes(self):
+        names = [name for _hive, _path, name in b.PROBE_POLICY_KEYS]
+        self.assertIn("DisableWindowsSpotlightFeatures", names)
+        personalization = "SOFTWARE\\Policies\\Microsoft\\Windows\\Personalization"
+        user = [(path, name) for hive, path, name in b.PROBE_POLICY_KEYS if hive == "HKCU"]
+        self.assertIn((personalization, "NoLockScreen"), user)
+        self.assertIn((personalization, "NoChangingLockScreen"), user)
+        self.assertIn("Desktop", b.PROBE_SHELL_FOLDERS)
+        self.assertIn("AppData", b.PROBE_SHELL_FOLDERS)
+        self.assertTrue(hasattr(b.ProbeSource, "_shell_folders"))
+
     def test_appprivacy_words(self):
         self.assertEqual(b.PROBE_APPPRIVACY_WORDS[2], "2 (force deny)")
         self.assertEqual(b.PROBE_APPPRIVACY_WORDS[0], "0 (user in control)")

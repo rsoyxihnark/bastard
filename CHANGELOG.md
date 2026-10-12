@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.2.3
+
+- Bastard 1.2.3 reads four more personalization policies and reports where the Desktop and AppData folders really are.
+- Probes now read the Spotlight policy, which can hold the lock screen and the desktop image.
+- Probes now read NoLockScreen and NoChangingLockScreen under the user, next to the machine ones they already read.
+- Probes now read NoSaveSettings, which keeps Explorer from saving what the user changes.
+- Probes now report the Desktop, AppData, Local AppData and Pictures folders, and warn when one is outside the user profile.
+- A redirected Desktop or AppData folder moves the trace log and the theme folders Bastard watches, so it is worth seeing.
+
 ## 1.2.2
 
 - Bastard 1.2.2 is the 1.2.1 fixes in a release: 1.2.1 was never published, because the release step stopped at its first check.
