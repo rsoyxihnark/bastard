@@ -24,7 +24,7 @@ import tkinter as tk
 import tkinter.font as tkfont
 from tkinter import filedialog, messagebox, ttk
 
-VERSION = "1.2.0"
+VERSION = "1.2.1"
 
 APP_NAME = "Bastard"
 IS_WIN = os.name == "nt"
@@ -111,6 +111,9 @@ MARKER_WINDOW = 6
 MARKER_DELAY = 8.5
 VIEW_LIMIT = 20000
 STORE_LIMIT = 1000000
+LOUD_SOURCES = frozenset((SRC_ETW, SRC_PM, SRC_TRACE))
+FLOOD_SHARE = 0.8
+SELFTEST_EVENTS = 50000
 INTERNAL_ERRORS = []
 
 FOLDERID_DESKTOP = "B4BFCC3A-DB2C-424C-B029-7FE99A87C641"
@@ -778,36 +781,68 @@ class LogWriter:
 
 
 class Store:
-    def __init__(self, limit=STORE_LIMIT):
+    def __init__(self, limit=STORE_LIMIT, flood_share=FLOOD_SHARE):
         self.limit = limit
+        self.flood_limit = max(1, int(limit * flood_share))
         self.items = []
         self.by_seq = {}
         self.dropped = 0
+        self.floods = 0
+        self.unsorted = False
 
     def clear(self):
         self.items = []
         self.by_seq = {}
         self.dropped = 0
+        self.floods = 0
+        self.unsorted = False
 
     def add(self, events):
         ordered = True
         items = self.items
         for ev in events:
-            if len(items) >= self.limit:
+            flood = ev.level == INFO and ev.source in LOUD_SOURCES
+            if len(items) >= self.limit or (flood and self.floods >= self.flood_limit):
                 self.dropped += 1
                 continue
             if items and ev.key() < items[-1].key():
                 ordered = False
             items.append(ev)
             self.by_seq[ev.seq] = ev
+            if flood:
+                self.floods += 1
         if not ordered:
-            items.sort(key=Event.key)
+            self.unsorted = True
         return ordered
 
+    def events(self):
+        if self.unsorted:
+            self.items.sort(key=Event.key)
+            self.unsorted = False
+        return self.items
+
     def window(self, start, end):
-        low = bisect.bisect_right(self.items, start, key=lambda ev: ev.ts)
-        high = bisect.bisect_right(self.items, end, key=lambda ev: ev.ts)
-        return self.items[low:high]
+        items = self.events()
+        low = bisect.bisect_right(items, start, key=lambda ev: ev.ts)
+        high = bisect.bisect_right(items, end, key=lambda ev: ev.ts)
+        return items[low:high]
+
+
+def sample_events(events, limit):
+    picked = [ev for ev in events if ev.source not in LOUD_SOURCES][:limit]
+    share = max(0, limit - len(picked)) // (2 * len(LOUD_SOURCES))
+    taken = {}
+    for ev in events:
+        if ev.source not in LOUD_SOURCES:
+            continue
+        slot = (ev.source, ev.level == INFO)
+        seen = taken.get(slot, 0)
+        if seen >= share:
+            continue
+        taken[slot] = seen + 1
+        picked.append(ev)
+    picked.sort(key=Event.key)
+    return picked
 
 
 class Source:
@@ -3796,7 +3831,7 @@ class App:
         self.rebuild_job = None
         selected = self.tree.selection()
         follow = self._following()
-        matches = [ev for ev in self.store.items if self._match(ev)]
+        matches = [ev for ev in self.store.events() if self._match(ev)]
         self.match_count = len(matches)
         rows = matches[-VIEW_LIMIT:]
         children = self.tree.get_children()
@@ -4000,7 +4035,7 @@ class App:
     def export(self, kind):
         if self.closing:
             return
-        events = [ev for ev in self.store.items if self._match(ev)]
+        events = [ev for ev in self.store.events() if self._match(ev)]
         if not events:
             messagebox.showinfo("Bastard", "There are no events to save.", parent=self.root)
             return
@@ -4133,7 +4168,7 @@ class App:
         for kind in ("csv", "json"):
             path = self.options["selftest"] + "." + kind
             try:
-                write_export(path, kind, self.store.items)
+                write_export(path, kind, self.store.events())
                 exports[kind] = os.path.getsize(path) > 0
             except Exception as exc:
                 exports[kind] = False
@@ -4141,7 +4176,8 @@ class App:
         result = {
             "version": VERSION, "platform": platform.platform(), "admin": session.admin,
             "status": {name: list(value) for name, value in status.items()}, "counts": counts,
-            "events": [ev.to_dict() for ev in self.store.items[:50000]], "errors": list(INTERNAL_ERRORS),
+            "events": [ev.to_dict() for ev in sample_events(self.store.events(), SELFTEST_EVENTS)],
+            "errors": list(INTERNAL_ERRORS),
             "log_path": session.log_path, "log_exists": bool(log_text), "log_lines": len(times),
             "log_sorted": times == sorted(times), "pml_path": session.pml_path, "exports": exports,
             "listed": len(self.tree.get_children()), "matching": self.match_count,
