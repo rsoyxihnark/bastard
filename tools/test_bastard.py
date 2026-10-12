@@ -1,0 +1,357 @@
+import importlib.machinery
+import importlib.util
+import json
+import os
+import shutil
+import tempfile
+import time
+import unittest
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+SOURCE = os.path.join(os.path.dirname(HERE), "bastard.pyw")
+
+
+def load():
+    loader = importlib.machinery.SourceFileLoader("bastard_under_test", SOURCE)
+    spec = importlib.util.spec_from_loader("bastard_under_test", loader)
+    module = importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+    return module
+
+
+b = load()
+
+
+def event(ts, source="Files", kind="File", level="change", text="x", proc="", pid=None, seq=None):
+    event.counter += 1
+    return b.Event(ts, seq or event.counter, source, kind, level, pid, proc, text, "")
+
+
+event.counter = 0
+
+
+class Formatting(unittest.TestCase):
+    def test_dword_and_qword(self):
+        self.assertEqual(b.format_reg_value("x", 4, 10), "10 (0xA)")
+        self.assertEqual(b.format_reg_value("x", 11, 2 ** 40), "%d (0x%X)" % (2 ** 40, 2 ** 40))
+
+    def test_strings(self):
+        self.assertEqual(b.format_reg_value("x", 1, "C:\\a.jpg"), '"C:\\a.jpg"')
+        self.assertEqual(b.format_reg_value("x", 7, ["a", "b"]), '["a", "b"]')
+        self.assertTrue(b.format_reg_value("x", 1, "y" * 500).endswith('..."'))
+
+    def test_binary(self):
+        self.assertEqual(b.format_reg_value("x", 3, b""), "0 bytes")
+        self.assertEqual(b.format_reg_value("x", 3, b"\x01\x02"), "2 bytes: 01 02")
+        self.assertTrue(b.format_reg_value("x", 3, bytes(40)).endswith(" ..."))
+
+    def test_transcoded_image_cache(self):
+        blob = bytes(24) + "C:\\Users\\me\\Pictures\\sea.jpg".encode("utf-16-le") + bytes(64)
+        self.assertEqual(b.decode_transcoded_image(blob), "C:\\Users\\me\\Pictures\\sea.jpg")
+        text = b.format_reg_value("TranscodedImageCache", 3, blob)
+        self.assertTrue(text.startswith('image "C:\\Users\\me\\Pictures\\sea.jpg"'), text)
+        self.assertEqual(b.decode_transcoded_image(bytes(30)), "")
+
+    def test_numbers_and_words(self):
+        self.assertEqual(b.as_int("0x1F"), 31)
+        self.assertEqual(b.as_int(" 12 "), 12)
+        self.assertEqual(b.as_int("nope", -1), -1)
+        self.assertEqual(b.exit_code_text(7), "7")
+        self.assertEqual(b.exit_code_text(0xC0000005), "0xC0000005")
+        self.assertEqual(b.exit_code_text(-1073741819), "0xC0000005")
+        self.assertEqual(b.plural(1, "event"), "1 event")
+        self.assertEqual(b.plural(3, "event"), "3 events")
+        self.assertEqual(b.duration_text(5), "5 seconds")
+        self.assertEqual(b.duration_text(125), "2 min 5 s")
+        self.assertEqual(b.short_duration(0.44), "0.4 s")
+        self.assertEqual(b.process_label("a.exe", 4), "a.exe (PID 4)")
+        self.assertEqual(b.process_label("", 4), "PID 4")
+        self.assertEqual(b.one_line("a\n  b\tc"), "a b c")
+        self.assertEqual(b.clean_text("a\x00b"), "ab")
+        self.assertEqual(b.clean_text("a\ud800b"), "a?b")
+
+    def test_times(self):
+        value = b.parse_system_time("2026-10-12T07:23:45.1234567Z")
+        self.assertAlmostEqual(value % 60, 45.1234567, places=5)
+        self.assertIsNone(b.parse_system_time("bad"))
+        self.assertEqual(b.filetime_to_epoch(116444736000000000), 0.0)
+        now = time.time()
+        self.assertEqual(b.sane_time(now - 5), (now - 5, True))
+        self.assertFalse(b.sane_time(603246995523.0)[1])
+        self.assertFalse(b.sane_time(-11644473600.0)[1])
+        self.assertFalse(b.sane_time("x")[1])
+        self.assertEqual(b.clock(-1e20), "??:??:??.???")
+
+
+class Registry(unittest.TestCase):
+    def test_diff(self):
+        old = ({"", "Sub", "Gone", "Gone\\Deep"}, {("", "A"): (4, 1), ("", "B"): (1, "x"), ("Gone", "V"): (4, 1),
+                                                  ("Gone\\Deep", "W"): (4, 2)})
+        new = ({"", "Sub", "New", "New\\Inner"}, {("", "A"): (4, 2), ("", "C"): (1, "y"), ("New", "N"): (4, 5)})
+        changes = b.reg_diff(old, new)
+        kinds = [(c[0], c[1], c[2]) for c in changes]
+        self.assertIn(("key added", "New", None), kinds)
+        self.assertNotIn(("key added", "New\\Inner", None), kinds)
+        self.assertIn(("value changed", "", "A"), kinds)
+        self.assertIn(("value added", "", "C"), kinds)
+        self.assertIn(("value added", "New", "N"), kinds)
+        self.assertIn(("value deleted", "", "B"), kinds)
+        self.assertIn(("key deleted", "Gone", None), kinds)
+        self.assertNotIn(("key deleted", "Gone\\Deep", None), kinds)
+        self.assertFalse(any(c[0] == "value deleted" and c[1].startswith("Gone") for c in changes))
+
+    def test_paths(self):
+        self.assertEqual(b.split_reg_path("HKEY_CURRENT_USER\\Software\\X\\"), ("HKCU", "Software\\X"))
+        self.assertEqual(b.split_reg_path("hklm\\SOFTWARE"), ("HKLM", "SOFTWARE"))
+        sid = "S-1-5-21-1-2-3-1001"
+        self.assertEqual(b.nice_reg_path("\\REGISTRY\\MACHINE\\SOFTWARE\\X", sid), "HKLM\\SOFTWARE\\X")
+        self.assertEqual(b.nice_reg_path("\\REGISTRY\\USER\\%s\\Control Panel" % sid, sid), "HKCU\\Control Panel")
+        self.assertEqual(b.nice_reg_path("\\REGISTRY\\USER\\%s_Classes\\.jpg" % sid, sid),
+                         "HKCU\\Software\\Classes\\.jpg")
+        self.assertEqual(b.nice_reg_path("\\REGISTRY\\USER\\S-1-5-18\\X", sid), "HKU\\S-1-5-18\\X")
+        self.assertEqual(b.nice_reg_path("HKCU\\X", sid), "HKCU\\X")
+
+    def test_device_map(self):
+        mapper = b.DeviceMap()
+        mapper.devices = [("\\device\\harddiskvolume3", "C:")]
+        self.assertEqual(mapper.to_dos("\\Device\\HarddiskVolume3\\Windows\\a.exe"), "C:\\Windows\\a.exe")
+        self.assertEqual(mapper.to_dos("\\??\\C:\\x"), "C:\\x")
+        self.assertEqual(mapper.to_dos("\\Device\\Other\\x"), "\\Device\\Other\\x")
+
+
+EVENTS_XML = "\n".join((
+    "<Event xmlns='http://schemas.microsoft.com/win/2004/08/events/event'><System><Provider Name='Application Error'/>",
+    "<EventID Qualifiers='0'>1000</EventID><Level>2</Level><TimeCreated SystemTime='2026-10-12T07:23:45.1234567Z'/>",
+    "<EventRecordID>4242</EventRecordID><Execution ProcessID='880' ThreadID='1'/><Channel>Application</Channel></System>",
+    "<EventData><Data>Photos.exe</Data></EventData><RenderingInfo Culture='en-US'><Message>Faulting application name: Photos.exe",
+    'second line</Message><Level>Error</Level><Task>(100)</Task></RenderingInfo></Event>',
+    "<Event xmlns='http://schemas.microsoft.com/win/2004/08/events/event'><System><Provider Name='BastardSelfTest'/>",
+    "<EventID>999</EventID><Level>3</Level><TimeCreated SystemTime='2026-10-12T07:23:46Z'/><EventRecordID>4243</EventRecordID>",
+    "<Channel>Application</Channel></System><EventData><Data Name='Text'>Bastard self test event</Data></EventData></Event>",
+))
+
+
+class EventLog(unittest.TestCase):
+    def test_parse(self):
+        records = b.parse_events_xml(EVENTS_XML)
+        self.assertEqual(len(records), 2)
+        first, second = records
+        self.assertEqual((first["id"], first["level"], first["record"], first["pid"]), (1000, 2, 4242, 880))
+        self.assertEqual(first["channel"], "Application")
+        self.assertEqual(first["data"], [("", "Photos.exe")])
+        text, level = b.event_log_text(first)
+        self.assertEqual(text, "Application: Error 1000 from Application Error: Faulting application name: Photos.exe")
+        self.assertEqual(level, b.ERROR)
+        text, level = b.event_log_text(second)
+        self.assertEqual(text, "Application: Warning 999 from BastardSelfTest: Text=Bastard self test event")
+        self.assertEqual(level, b.WARN)
+
+    def test_parse_broken_text(self):
+        records = b.parse_events_xml("garbage " + EVENTS_XML.split("</Event>", 1)[0] + "</Event> <Event>broken")
+        self.assertEqual(len(records), 1)
+        self.assertEqual(b.parse_events_xml(""), [])
+
+    def test_query_and_decoding(self):
+        query = b.structured_query([("Application", "*[System[(EventRecordID > 5)]]"), ("System", "*")])
+        self.assertIn('<Select Path="Application">*[System[(EventRecordID &gt; 5)]]</Select>', query)
+        self.assertTrue(query.startswith('<QueryList><Query Id="0" Path="Application">'))
+        self.assertEqual(b.decode_tool_output("\u00e7".encode("utf-8")), "\u00e7")
+        self.assertEqual(b.decode_tool_output(b"\xef\xbb\xbfabc"), "abc")
+        self.assertEqual(b.decode_tool_output(b"\xff\xfe" + "ab".encode("utf-16-le")), "ab")
+        self.assertEqual(b.short_channel("Microsoft-Windows-Shell-Core/Operational"), "Shell-Core/Operational")
+
+
+class ProcMon(unittest.TestCase):
+    def test_digest(self):
+        digest = b.ProcmonDigest(own_pid=99, limit=4)
+        digest.add(10.0, "Photos.exe", 5, "RegSetValue", "HKCU\\X\\A", "SUCCESS")
+        digest.add(11.0, "Photos.exe", 5, "RegSetValue", "HKCU\\X\\A", "SUCCESS")
+        digest.add(12.0, "Photos.exe", 5, "RegOpenKey", "HKLM\\Y", "ACCESS DENIED")
+        digest.add(13.0, "Photos.exe", 5, "RegQueryValue", "HKLM\\Y", "SUCCESS")
+        digest.add(14.0, "System", 4, "WriteFile", "C:\\x.txt", "SUCCESS")
+        digest.add(15.0, "Bastard.exe", 99, "WriteFile", "C:\\log.txt", "SUCCESS")
+        digest.add(16.0, "Procmon64.exe", 7, "WriteFile", "C:\\t.pml", "SUCCESS")
+        digest.add(17.0, "app.exe", 8, "WriteFile", "C:\\data.bin", "SUCCESS")
+        digest.add(18.0, "app.exe", 8, "TCP Connect", "a -> b", "ACCESS DENIED")
+        digest.add(19.0, "app.exe", 8, "SetDispositionInformationFile", "C:\\old.bin", "SUCCESS")
+        digest.add(20.0, "app.exe", 8, "WriteFile", "C:\\more.bin", "SUCCESS")
+        rows = digest.ordered()
+        self.assertEqual(digest.total, 11)
+        self.assertEqual([row[5] for row in rows], ["RegSetValue", "RegOpenKey", "WriteFile", "SetDispositionInformationFile"])
+        self.assertEqual(rows[0][2], 2)
+        self.assertEqual(rows[0][1], 11.0)
+        self.assertEqual(rows[1][9], b.ERROR)
+        self.assertEqual(rows[1][8], b.KIND_REG)
+        self.assertEqual((digest.denied, digest.reg_writes, digest.file_writes, digest.over), (1, 1, 2, 1))
+
+    def test_time_of_day(self):
+        day = time.mktime((2026, 10, 12, 13, 0, 0, 0, 0, -1))
+        value = b.procmon_time_of_day("2:05:12.1234567 PM", day)
+        self.assertAlmostEqual(value - day, 3912.1234567, places=4)
+        self.assertAlmostEqual(b.procmon_time_of_day("14:05:12,5", day) - day, 3912.5, places=4)
+        late = time.mktime((2026, 10, 12, 23, 59, 0, 0, 0, -1))
+        self.assertAlmostEqual(b.procmon_time_of_day("00:00:30", late) - late, 90.0, places=3)
+        self.assertEqual(b.procmon_time_of_day("nonsense", day), day)
+
+    def test_csv(self):
+        folder = tempfile.mkdtemp()
+        try:
+            rows = [["Time of Day", "Process Name", "PID", "Operation", "Path", "Result", "Detail"],
+                    ["2:05:12.1 PM", "app.exe", "8", "RegSetValue", "HKCU\\X", "SUCCESS", "Type: REG_SZ"]]
+            first = os.path.join(folder, "a.csv")
+            with open(first, "w", encoding="utf-8-sig", newline="") as fh:
+                fh.write("\r\n".join(",".join('"%s"' % cell for cell in row) for row in rows) + "\r\n")
+            second = os.path.join(folder, "b.csv")
+            with open(second, "w", encoding="utf-16", newline="") as fh:
+                fh.write("\r\n".join("\t".join(row) for row in rows) + "\r\n")
+            for path in (first, second):
+                found = list(b.procmon_csv_rows(path))
+                self.assertEqual(len(found), 1, path)
+                self.assertEqual(found[0]["Process Name"], "app.exe")
+                self.assertEqual(found[0]["Operation"], "RegSetValue")
+        finally:
+            shutil.rmtree(folder, ignore_errors=True)
+
+
+class Timeline(unittest.TestCase):
+    def test_store_order_and_window(self):
+        store = b.Store(limit=5)
+        self.assertTrue(store.add([event(1.0), event(2.0)]))
+        self.assertFalse(store.add([event(1.5)]))
+        self.assertEqual([ev.ts for ev in store.items], [1.0, 1.5, 2.0])
+        self.assertEqual([ev.ts for ev in store.window(1.0, 2.0)], [1.5, 2.0])
+        store.add([event(3.0), event(4.0), event(5.0)])
+        self.assertEqual(store.dropped, 1)
+
+    def test_marker_summary(self):
+        text, level, _ = b.marker_summary(2, 100.0, [event(99.0), event(107.0)])
+        self.assertEqual(level, b.WARN)
+        self.assertEqual(text, "Marker 2: nothing happened in the 6 seconds after it")
+        events = [event(101.0, proc="Photos.exe"), event(102.0, "Registry", "Registry", proc="Photos.exe"),
+                  event(103.0, "System", "System"), event(105.9, proc="x.exe")]
+        text, level, detail = b.marker_summary(1, 100.0, events)
+        self.assertEqual(level, b.MARK)
+        self.assertEqual(text, "Marker 1: 3 events in the 6 seconds after it (Files 2, Registry 1), from Photos.exe, x.exe")
+        self.assertEqual(len(detail.splitlines()), 3)
+
+    def test_hub(self):
+        hub = b.Hub()
+        ev = hub.emit("Files", "File", "a\x00b", ts=603246995523.0)
+        self.assertEqual(ev.text, "ab")
+        self.assertLess(abs(ev.ts - time.time()), 5)
+        hub.set_status("Files", "running", "1 folder")
+        status, counts = hub.snapshot()
+        self.assertEqual(status["Files"], ("running", "1 folder"))
+        self.assertEqual(counts["Files"], 1)
+        hub.reset(["Files"])
+        self.assertEqual(hub.snapshot(), ({"Files": ("idle", "")}, {}))
+
+    def test_log_writer_sorts(self):
+        folder = tempfile.mkdtemp()
+        try:
+            path = os.path.join(folder, "t.log")
+            writer = b.LogWriter(path, ["Header"])
+            self.assertTrue(writer.start())
+            now = time.time()
+            writer.put(event(now + 2, text="second"))
+            writer.put(event(now + 1, text="first"))
+            writer.close(["Summary"], True)
+            with open(path, encoding="utf-8") as fh:
+                text = fh.read()
+            self.assertLess(text.index("first"), text.index("second"))
+            self.assertTrue(text.startswith("Header\n"))
+            self.assertTrue(text.rstrip().endswith("Summary"))
+            self.assertFalse(os.path.exists(path + ".tmp"))
+        finally:
+            shutil.rmtree(folder, ignore_errors=True)
+
+    def test_exports(self):
+        folder = tempfile.mkdtemp()
+        try:
+            events = [event(time.time(), text='quote " and comma ,', proc="a.exe", pid=3)]
+            b.write_export(os.path.join(folder, "e.csv"), "csv", events)
+            b.write_export(os.path.join(folder, "e.json"), "json", events)
+            with open(os.path.join(folder, "e.json"), encoding="utf-8") as fh:
+                data = json.load(fh)
+            self.assertEqual(data["events"][0]["event"], 'quote " and comma ,')
+            self.assertEqual(data["bastard"], b.VERSION)
+            with open(os.path.join(folder, "e.csv"), encoding="utf-8-sig") as fh:
+                self.assertTrue(fh.readline().startswith("Time,Source,Kind,Level,Process,PID,Event,Detail"))
+        finally:
+            shutil.rmtree(folder, ignore_errors=True)
+
+    def test_options(self):
+        options = b.parse_options(["--selftest", "r.json", "--watch-key", "HKCU\\X", "--seconds", "12", "--bogus"])
+        self.assertTrue(options["selftest"].endswith("r.json"))
+        self.assertEqual(options["watch_keys"], ["HKCU\\X"])
+        self.assertEqual(options["seconds"], 12.0)
+        self.assertEqual(b.duration_clock(3725), "01:02:05")
+
+
+class Window(unittest.TestCase):
+    def setUp(self):
+        try:
+            self.root = b.tk.Tk()
+        except b.tk.TclError as exc:
+            self.skipTest("no display: %s" % exc)
+        self.root.withdraw()
+        self.home = tempfile.mkdtemp()
+        self.saved = (b.SETTINGS_PATH, b.DATA_DIR)
+        b.DATA_DIR = self.home
+        b.SETTINGS_PATH = os.path.join(self.home, "settings.json")
+
+    def tearDown(self):
+        b.SETTINGS_PATH, b.DATA_DIR = self.saved
+        shutil.rmtree(self.home, ignore_errors=True)
+
+    def test_filters_search_and_selection(self):
+        scale = b.setup_style(self.root)
+        app = b.App(self.root, b.parse_options([]), scale)
+        now = time.time()
+        app.hub.emit(b.SRC_REG, b.KIND_REG, "HKCU\\Control Panel\\Desktop [WallPaper] changed", b.CHANGE, ts=now)
+        app.hub.emit(b.SRC_PROC, b.KIND_PROC, "Started Photos.exe (PID 7)", pid=7, proc="Photos.exe", ts=now + 1)
+        app.hub.emit(b.SRC_LOG, b.KIND_LOG, "Application: Error 1000", b.ERROR, ts=now + 2)
+        app.hub.emit(b.SRC_SYSTEM, b.KIND_MARK, "Marker 1", b.MARK, ts=now + 3)
+        app._drain()
+        self.assertEqual(len(app.tree.get_children()), 4)
+        app.hub.emit(b.SRC_FILES, b.KIND_FILE, "File changed: late", b.CHANGE, ts=now - 5)
+        app._drain()
+        app.root.after_cancel(app.rebuild_job)
+        app._rebuild()
+        self.assertEqual(app.tree.get_children()[0], str(app.store.items[0].seq))
+        app.show_box.current(2)
+        app._filters_changed()
+        app._rebuild()
+        self.assertEqual(len(app.tree.get_children()), 2)
+        app.show_box.current(0)
+        app.search_var.set("photos")
+        app._filters_changed()
+        app._rebuild()
+        self.assertEqual(len(app.tree.get_children()), 2)
+        app.source_chips[b.SRC_PROC]._toggle()
+        app._rebuild()
+        self.assertEqual(len(app.tree.get_children()), 1)
+        app.source_chips[b.SRC_PROC]._toggle()
+        app.search_var.set("")
+        app._filters_changed()
+        app._rebuild()
+        first = app.tree.get_children()[2]
+        app.tree.selection_set(first)
+        app._selected()
+        self.assertIn("Process:  Photos.exe (PID 7)", app.detail.get("1.0", "end"))
+        app.copy_selection()
+        try:
+            copied = self.root.clipboard_get()
+        except b.tk.TclError:
+            copied = None
+        if copied is not None:
+            self.assertIn("Started Photos.exe", copied)
+        app.on_close()
+        with open(b.SETTINGS_PATH, encoding="utf-8") as fh:
+            saved = json.load(fh)
+        self.assertEqual(saved["show"], 0)
+        self.assertTrue(saved["sources"][b.SRC_PROC])
+
+
+if __name__ == "__main__":
+    unittest.main()
