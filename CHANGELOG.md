@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.2.2
+
+- Bastard 1.2.2 is the 1.2.1 fixes in a release: 1.2.1 was never published, because the release step stopped at its first check.
+- The release step now accepts a merge at the head of a push, and takes the version from the commit that sets it.
+- The release step no longer checks a merge commit message, which is made from the branch name rather than written by hand.
+- Nothing in the program itself changed since 1.2.1.
+
 ## 1.2.1
 
 - Bastard 1.2.1 keeps the quiet sources in the timeline when ETW, ProcMon and Trace Tools flood it.
