@@ -1,8 +1,8 @@
 # Changelog
 
-## 1.6.1
+## 1.6.2
 
-- Bastard 1.6.1 leaves every row about Bastard itself out of the timeline, whichever source reported it.
+- Bastard 1.6.2 leaves every row about Bastard itself out of the timeline, whichever source reported it.
 - The filter now leaves out every event naming Bastard, so the PowerShell it starts for its own checks is gone.
 
 ## 1.6.0

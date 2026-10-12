@@ -1,3 +1,4 @@
+import importlib
 import importlib.machinery
 import importlib.util
 import io
@@ -5,6 +6,7 @@ import json
 import os
 import queue
 import shutil
+import sys
 import tempfile
 import time
 import unittest
@@ -22,6 +24,11 @@ def load():
 
 
 b = load()
+selftest = importlib.import_module("run_selftest") if HERE in sys.path else None
+if selftest is None:
+    sys.path.insert(0, HERE)
+    selftest = importlib.import_module("run_selftest")
+SELFTEST_WORK = "C:\\Users\\RUNNER~1\\AppData\\Local\\Temp\\%sab12cd34\\watched" % selftest.WORK_PREFIX
 
 
 def event(ts, source="Files", kind="File", level="change", text="x", proc="", pid=None, seq=None):
@@ -318,9 +325,10 @@ class Timeline(unittest.TestCase):
         wanted = [
             (b.SRC_SYSTEM, b.INFO, "Trace stopped after 32.0 s"),
             (b.SRC_SYSTEM, b.MARK, "Marker 1: 4 events in the 6 seconds after it"),
-            (b.SRC_FILES, b.CHANGE, "File created: x.txt"),
-            (b.SRC_FILES, b.CHANGE, "renamed x.txt to y.txt"),
-            (b.SRC_FILES, b.CHANGE, "deleted y.txt"),
+            (b.SRC_FILES, b.CHANGE, "File created: %s\\x.txt" % SELFTEST_WORK),
+            (b.SRC_FILES, b.CHANGE, "File renamed: %s\\x.txt -> %s\\y.txt" % (SELFTEST_WORK, SELFTEST_WORK)),
+            (b.SRC_FILES, b.CHANGE, "File deleted: %s\\y.txt" % SELFTEST_WORK),
+            (b.SRC_FILES, b.CHANGE, "File changed: %s\\tick.txt" % SELFTEST_WORK),
             (b.SRC_PROC, b.INFO, "Started python.exe (PID 7) by python.exe (PID 1)"),
             (b.SRC_PROC, b.INFO, "Exited cmd.exe (PID 9) with exit code 7 after 0.0 s"),
             (b.SRC_REG, b.CHANGE, "HKCU\\Software\\TraceSelfTest [A] 1 (0x1) -> 2 (0x2)"),
@@ -651,6 +659,21 @@ class Timeline(unittest.TestCase):
         for text in ("Bastard 1.6.1 started", "Trace started", "Trace stopped after 32.0 s",
                      "ProcMon: read 1000 events", "Marker 1: 4 events in the 6 seconds after it"):
             self.assertFalse(rules.blocks(b.SRC_SYSTEM, b.INFO, text), text)
+        self.assertEqual(rules.blocked, 0)
+
+    def test_the_defaults_let_the_selftest_names_through(self):
+        rules = b.Exclusions(b.DEFAULT_EXCLUSIONS)
+        work = "C:\\Temp\\%sxyz\\watched" % selftest.WORK_PREFIX
+        wanted = [
+            (b.SRC_FILES, b.CHANGE, "File created: %s\\x.txt" % work),
+            (b.SRC_FILES, b.CHANGE, "File renamed: %s\\x.txt -> %s\\y.txt" % (work, work)),
+            (b.SRC_FILES, b.CHANGE, "File deleted: %s\\y.txt" % work),
+            (b.SRC_REG, b.CHANGE, "HKCU\\%s [A] 1 (0x1) -> 2 (0x2)" % selftest.KEY),
+            (b.SRC_REG, b.CHANGE, "HKCU\\%s\\Sub created" % selftest.KEY),
+            (b.SRC_PM, b.CHANGE, "registry RegSetValue HKCU\\%s [A]" % selftest.KEY),
+        ]
+        for source, level, text in wanted:
+            self.assertFalse(rules.blocks(source, level, text), text)
         self.assertEqual(rules.blocked, 0)
 
     def test_marker_summary(self):

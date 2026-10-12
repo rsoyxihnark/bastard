@@ -8,6 +8,7 @@ import time
 
 IS_WIN = os.name == "nt"
 KEY = "Software\\TraceSelfTest"
+WORK_PREFIX = "trace_selftest_"
 SECONDS = 32
 MARKER_AT = 10
 
@@ -177,7 +178,7 @@ def main(argv):
         return 2
     target = os.path.abspath(argv[0])
     command = [target] if target.lower().endswith(".exe") else [sys.executable, target]
-    work = tempfile.mkdtemp(prefix="bastard_selftest_")
+    work = tempfile.mkdtemp(prefix=WORK_PREFIX)
     result_path = os.path.join(work, "result.json")
     folder = os.path.join(work, "watched")
     os.makedirs(folder)
