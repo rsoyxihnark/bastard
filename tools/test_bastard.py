@@ -163,26 +163,34 @@ class EventLog(unittest.TestCase):
 
 class ProcMon(unittest.TestCase):
     def test_digest(self):
-        digest = b.ProcmonDigest(own_pid=99, limit=4)
-        digest.add(10.0, "Photos.exe", 5, "RegSetValue", "HKCU\\X\\A", "SUCCESS")
-        digest.add(11.0, "Photos.exe", 5, "RegSetValue", "HKCU\\X\\A", "SUCCESS")
+        digest = b.ProcmonDigest(own_pid=99, limit=100)
+        digest.add(10.0, "Photos.exe", 5, "RegSetValue", "HKCU\\Control Panel\\Desktop\\Wallpaper", "SUCCESS")
+        digest.add(11.0, "Photos.exe", 5, "RegQueryValue", "HKCU\\Control Panel\\Desktop", "SUCCESS")
         digest.add(12.0, "Photos.exe", 5, "RegOpenKey", "HKLM\\Y", "ACCESS DENIED")
-        digest.add(13.0, "Photos.exe", 5, "RegQueryValue", "HKLM\\Y", "SUCCESS")
+        digest.add(13.0, "Photos.exe", 5, "RegQueryValue", "HKLM\\SomeOther", "SUCCESS")
         digest.add(14.0, "System", 4, "WriteFile", "C:\\x.txt", "SUCCESS")
         digest.add(15.0, "Bastard.exe", 99, "WriteFile", "C:\\log.txt", "SUCCESS")
         digest.add(16.0, "Procmon64.exe", 7, "WriteFile", "C:\\t.pml", "SUCCESS")
-        digest.add(17.0, "app.exe", 8, "WriteFile", "C:\\data.bin", "SUCCESS")
-        digest.add(18.0, "app.exe", 8, "TCP Connect", "a -> b", "ACCESS DENIED")
-        digest.add(19.0, "app.exe", 8, "SetDispositionInformationFile", "C:\\old.bin", "SUCCESS")
-        digest.add(20.0, "app.exe", 8, "WriteFile", "C:\\more.bin", "SUCCESS")
+        digest.add(17.0, "app.exe", 8, "WriteFile", "C:\\wallpaper.jpg", "SUCCESS")
+        digest.add(18.0, "app.exe", 8, "TCP Connect", "a to b", "ACCESS DENIED")
+        digest.add(19.0, "app.exe", 8, "ReadFile", "C:\\Users\\me\\wallpaper theme.jpg", "SUCCESS")
+        digest.add(20.0, "app.exe", 8, "ReadFile", "C:\\data.bin", "SUCCESS")
         rows = digest.ordered()
         self.assertEqual(digest.total, 11)
-        self.assertEqual([row[5] for row in rows], ["RegSetValue", "RegOpenKey", "WriteFile", "SetDispositionInformationFile"])
-        self.assertEqual(rows[0][2], 2)
-        self.assertEqual(rows[0][1], 11.0)
-        self.assertEqual(rows[1][9], b.ERROR)
-        self.assertEqual(rows[1][8], b.KIND_REG)
-        self.assertEqual((digest.denied, digest.reg_writes, digest.file_writes, digest.over), (1, 1, 2, 1))
+        self.assertEqual([row[0] for row in rows], [10.0, 11.0, 12.0, 17.0, 19.0])
+        self.assertEqual([row[3] for row in rows], ["RegSetValue", "RegQueryValue", "RegOpenKey", "WriteFile", "ReadFile"])
+        self.assertEqual(rows[2][5], "ACCESS DENIED")
+        self.assertEqual(rows[2][7], b.ERROR)
+        self.assertEqual(rows[0][6], b.KIND_REG)
+        self.assertEqual((digest.denied, digest.reg_writes, digest.file_writes, digest.reads, digest.over),
+                         (1, 1, 1, 2, 0))
+
+    def test_scope(self):
+        self.assertTrue(b.procmon_in_scope("C:\\Users\\me\\AppData\\Roaming\\Microsoft\\Windows\\Themes\\x"))
+        self.assertTrue(b.procmon_in_scope("HKCU\\Control Panel\\Desktop"))
+        self.assertTrue(b.procmon_in_scope("C:\\lockscreen.jpg"))
+        self.assertFalse(b.procmon_in_scope("C:\\Windows\\System32\\kernel32.dll"))
+        self.assertFalse(b.procmon_in_scope(""))
 
     def test_time_of_day(self):
         day = time.mktime((2026, 10, 12, 13, 0, 0, 0, 0, -1))
@@ -211,6 +219,22 @@ class ProcMon(unittest.TestCase):
                 self.assertEqual(found[0]["Operation"], "RegSetValue")
         finally:
             shutil.rmtree(folder, ignore_errors=True)
+
+
+class NewSources(unittest.TestCase):
+    def test_reg_helpers_guard(self):
+        self.assertIsNone(b.reg_read_value(None, "Software\\X", "Y"))
+        self.assertFalse(b.reg_key_exists(None, "Software\\X"))
+
+    def test_source_registry(self):
+        names = [cls.name for cls in b.SOURCE_TYPES]
+        for wanted in (b.SRC_ETW, b.SRC_WMI, b.SRC_PROBE, b.SRC_TRACE):
+            self.assertIn(wanted, names)
+        self.assertEqual(b.ETW_GUID_NAMES["{70EB4F03-C1DE-4F73-A051-33D13D541355}"], "Kernel-Registry")
+
+    def test_appprivacy_words(self):
+        self.assertEqual(b.PROBE_APPPRIVACY_WORDS[2], "2 (force deny)")
+        self.assertEqual(b.PROBE_APPPRIVACY_WORDS[0], "0 (user in control)")
 
 
 class Timeline(unittest.TestCase):

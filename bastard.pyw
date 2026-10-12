@@ -24,7 +24,7 @@ import tkinter as tk
 import tkinter.font as tkfont
 from tkinter import filedialog, messagebox, ttk
 
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 
 APP_NAME = "Bastard"
 IS_WIN = os.name == "nt"
@@ -63,6 +63,16 @@ except Exception:
     ProcmonLogsReader = None
     procmon_result_text = None
 
+wmi_module = None
+pythoncom = None
+if IS_WIN:
+    try:
+        import wmi as wmi_module
+        import pythoncom
+    except Exception:
+        wmi_module = None
+        pythoncom = None
+
 INFO = "info"
 CHANGE = "change"
 WARN = "warn"
@@ -78,6 +88,10 @@ SRC_WIN = "Windows"
 SRC_LOG = "Event Log"
 SRC_PM = "ProcMon"
 SRC_WALL = "Wallpaper"
+SRC_ETW = "ETW"
+SRC_WMI = "WMI"
+SRC_PROBE = "Probes"
+SRC_TRACE = "Trace Tools"
 
 KIND_REG = "Registry"
 KIND_FILE = "File"
@@ -87,6 +101,8 @@ KIND_DESK = "Desktop"
 KIND_LOG = "Log"
 KIND_SYS = "System"
 KIND_MARK = "Marker"
+KIND_PROBE = "Probe"
+KIND_ETW = "Trace"
 
 CREATE_NO_WINDOW = 0x08000000
 FILETIME_EPOCH = 116444736000000000
@@ -853,6 +869,12 @@ REG_ROOTS = (
     ("HKCU", "Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Accent"),
     ("HKCU", "Software\\Microsoft\\Windows\\DWM"),
     ("HKLM", "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\PersonalizationCSP"),
+    ("HKLM", "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Authentication\\LogonUI\\Background"),
+    ("HKLM", "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\ActivatableClasses\\Package"),
+    ("HKLM", "SOFTWARE\\Policies\\Microsoft\\Windows\\Personalization"),
+    ("HKCU", "SOFTWARE\\Policies\\Microsoft\\Windows\\Personalization"),
+    ("HKLM", "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Policies\\System"),
+    ("HKCU", "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Policies\\System"),
 )
 REG_NOTIFY_FILTER = 0x00000001 | 0x00000004
 WAIT_TIMEOUT = 0x102
@@ -1150,6 +1172,7 @@ def default_watch_folders():
     if local:
         out.append(os.path.join(local, "Microsoft", "Windows", "Themes"))
         out.append(os.path.join(local, "Packages", "Microsoft.Windows.Photos_8wekyb3d8bbwe"))
+        out.append(os.path.join(local, "Microsoft", "Windows", "Explorer"))
     return out
 
 
@@ -1168,8 +1191,6 @@ class FilesSource(Source):
 
     def start(self):
         self.observer = None
-        self.recent = {}
-        self.lock = threading.Lock()
         folders = []
         wanted = default_watch_folders() + list(self.session.options.get("watch_folders", []))
         for path in wanted:
@@ -1220,14 +1241,6 @@ class FilesSource(Source):
         src = os.fsdecode(src) if src else ""
         dst = os.fsdecode(dst) if dst else ""
         now = time.time()
-        key = (kind, src, dst)
-        with self.lock:
-            last = self.recent.get(key)
-            if last is not None and now - last < 0.5:
-                return
-            self.recent[key] = now
-            if len(self.recent) > 5000:
-                self.recent = {k: v for k, v in self.recent.items() if now - v < 5}
         noun = "Folder" if is_dir else "File"
         if kind == "created":
             text = "%s created: %s" % (noun, src)
@@ -1560,6 +1573,7 @@ class ProcessSource(Source):
 EVENT_SYSTEM_FOREGROUND = 0x0003
 EVENT_SYSTEM_DIALOGSTART = 0x0010
 EVENT_SYSTEM_DIALOGEND = 0x0011
+EVENT_OBJECT_CREATE = 0x8000
 EVENT_OBJECT_DESTROY = 0x8001
 EVENT_OBJECT_SHOW = 0x8002
 WINEVENT_OUTOFCONTEXT = 0x0000
@@ -1651,7 +1665,7 @@ class WindowsSource(Source):
         hooks = []
         ranges = ((EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND),
                   (EVENT_SYSTEM_DIALOGSTART, EVENT_SYSTEM_DIALOGEND),
-                  (EVENT_OBJECT_DESTROY, EVENT_OBJECT_SHOW))
+                  (EVENT_OBJECT_CREATE, EVENT_OBJECT_SHOW))
         for low, high in ranges:
             handle = api.user.SetWinEventHook(low, high, None, self.callback, 0, 0,
                                               WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS)
@@ -1743,6 +1757,17 @@ class WindowsSource(Source):
     def _on_event(self, hook, event, hwnd, id_object, id_child, thread_id, ms):
         try:
             if id_object != 0 or id_child != 0 or not hwnd:
+                return
+            if event == EVENT_OBJECT_CREATE:
+                if self.api.user.GetAncestor(hwnd, GA_ROOT) != hwnd:
+                    return
+                if self.api.get_long(hwnd, GWL_EXSTYLE) & WS_EX_TOOLWINDOW:
+                    return
+                title = self._text(hwnd)
+                pid, name, host = self._owner(hwnd)
+                label = title or "(%s)" % (self._class(hwnd) or "window")
+                self.emit(KIND_WIN, "Window created: %s%s" % (label, self._suffix(name)), INFO, pid=pid,
+                          proc=name, detail=self._detail(hwnd, title, host), ts=self._when(ms))
                 return
             if event == EVENT_OBJECT_DESTROY:
                 info = self.shown.pop(hwnd, None)
@@ -2106,8 +2131,17 @@ PROCMON_FILE_WRITES = frozenset(("WriteFile", "SetDispositionInformationFile", "
                                  "SetRenameInformationExBypassAccessCheck", "SetSecurityFile"))
 PROCMON_PROCESS_OPS = frozenset(("Process Create", "Process Exit", "Process Start", "Thread Create", "Thread Exit",
                                  "Load Image", "Process Statistics", "Process Profiling", "Thread Profiling"))
-PROCMON_ROW_LIMIT = 50000
+PROCMON_SCOPE = ("wallpaper", "transcoded", "\\themes\\", "\\themes.", "\\theme\\", ".theme", ".deskthemepack",
+                 "lock screen", "lockscreen", "personaliz", "photos", "spotlight", "slideshow", "assetmanager",
+                 "control panel\\desktop", "\\dwm", "logonui", "\\background", "accent", "\\desktop]",
+                 "roamedtiledata", "cachedfiles", "microsoft.windows.photos")
+PROCMON_ROW_LIMIT = 200000
 PROCMON_KEEP = 5
+
+
+def procmon_in_scope(path):
+    low = (path or "").lower()
+    return any(mark in low for mark in PROCMON_SCOPE)
 TIME_OF_DAY_RE = re.compile(r"(\d{1,2}):(\d{2}):(\d{2})(?:[.,](\d+))?\s*([AaPp])?")
 
 
@@ -2134,12 +2168,13 @@ class ProcmonDigest:
     def __init__(self, own_pid, limit=PROCMON_ROW_LIMIT):
         self.own_pid = own_pid
         self.limit = limit
-        self.rows = {}
+        self.rows = []
         self.total = 0
         self.over = 0
         self.denied = 0
         self.reg_writes = 0
         self.file_writes = 0
+        self.reads = 0
 
     def add(self, ts, proc, pid, operation, path, result):
         self.total += 1
@@ -2150,8 +2185,6 @@ class ProcmonDigest:
             return
         if result in PROCMON_DENIED:
             kind, level, tag = procmon_kind(operation), ERROR, "denied"
-        elif result != "SUCCESS":
-            return
         elif operation in PROCMON_REG_WRITES:
             kind, level, tag = KIND_REG, CHANGE, "registry"
         elif operation in PROCMON_FILE_WRITES:
@@ -2159,27 +2192,25 @@ class ProcmonDigest:
             if name == "system" or low.startswith("c:\\$") or low.endswith("\\pagefile.sys"):
                 return
             kind, level, tag = KIND_FILE, CHANGE, "file"
+        elif procmon_in_scope(path):
+            kind, level, tag = procmon_kind(operation), INFO, "read"
         else:
-            return
-        key = (pid, operation, path, result)
-        row = self.rows.get(key)
-        if row is not None:
-            row[1] = ts
-            row[2] += 1
             return
         if len(self.rows) >= self.limit:
             self.over += 1
             return
-        self.rows[key] = [ts, ts, 1, proc, pid, operation, path, result, kind, level]
+        self.rows.append([ts, proc, pid, operation, path, result, kind, level])
         if tag == "denied":
             self.denied += 1
         elif tag == "registry":
             self.reg_writes += 1
-        else:
+        elif tag == "file":
             self.file_writes += 1
+        else:
+            self.reads += 1
 
     def ordered(self):
-        return sorted(self.rows.values(), key=lambda row: row[0])
+        return sorted(self.rows, key=lambda row: row[0])
 
 
 def procmon_time_of_day(text, day_start):
@@ -2396,19 +2427,16 @@ class ProcMonSource(Source):
 
     def _publish(self, digest, info):
         rows = digest.ordered()
-        for first, last, count, proc, pid, operation, path, result, kind, level in rows:
+        for ts, proc, pid, operation, path, result, kind, level in rows:
             text = "%s %s" % (operation, path) if path else operation
-            if level == ERROR:
+            if result and result != "SUCCESS":
                 text += ": " + result
-            if count > 1:
-                text += " (%d times)" % count
             detail = ["Operation: " + operation, "Path: " + (path or "(none)"), "Result: " + result,
                       "Process: %s (PID %s)" % (proc, pid)]
-            if count > 1:
-                detail.append("Seen %d times, last at %s" % (count, clock(last)))
-            self.emit(kind, one_line(text, 600), level, pid=pid, proc=proc, detail="\n".join(detail), ts=first)
-        summary = "read %s, listed %d: %d denied, %d registry writes, %d file writes" % (
-            plural(digest.total, "event"), len(rows), digest.denied, digest.reg_writes, digest.file_writes)
+            self.emit(kind, one_line(text, 600), level, pid=pid, proc=proc, detail="\n".join(detail), ts=ts)
+        summary = "read %s, listed %d: %d denied, %d registry writes, %d file writes, %d scope reads" % (
+            plural(digest.total, "event"), len(rows), digest.denied, digest.reg_writes, digest.file_writes,
+            digest.reads)
         if digest.over:
             summary += ", %d more not listed" % digest.over
         self.note(summary, INFO, "Capture file: %s\nRead: %s" % (self.pml, info))
@@ -2451,8 +2479,659 @@ class WallpaperSource(Source):
                 last = now
 
 
-SOURCE_TYPES = (RegistrySource, FilesSource, ProcessSource, WindowsSource, EventLogSource, WallpaperSource,
-                ProcMonSource)
+
+def reg_read_value(hive_const, path, name):
+    if winreg is None or hive_const is None:
+        return None
+    try:
+        with winreg.OpenKey(hive_const, path, 0, winreg.KEY_READ) as key:
+            value, _kind = winreg.QueryValueEx(key, name)
+            return value
+    except OSError:
+        return None
+
+
+def reg_key_exists(hive_const, path):
+    if winreg is None or hive_const is None:
+        return False
+    try:
+        handle = winreg.OpenKey(hive_const, path, 0, winreg.KEY_READ)
+        handle.Close()
+        return True
+    except OSError:
+        return False
+
+
+def run_text(cmd, timeout):
+    try:
+        result = run_hidden(cmd, timeout)
+    except Exception as exc:
+        return None, one_line(exc, 200)
+    return result.returncode, decode_tool_output(result.stdout) + decode_tool_output(result.stderr)
+
+
+ETW_RAW_PROVIDERS = (
+    ("Kernel-Registry", "{70EB4F03-C1DE-4F73-A051-33D13D541355}", True),
+    ("Kernel-File", "{EDD08927-9CC4-4E65-B970-C2560FB5C289}", True),
+    ("Shell-Core", "{30336ED4-E327-447C-9DE0-51B2E6059F02}", False),
+    ("Immersive-Shell", "{BC2C92D8-8DB4-4F8B-8D29-8F3A3A0BF1A4}", False),
+    ("Themes", "{7B67BEC2-6E2F-4A68-B7E4-9D3E9A4C4C8F}", False),
+)
+ETW_GUID_NAMES = {guid.upper(): name for name, guid, _kernel in ETW_RAW_PROVIDERS}
+ETW_SCOPE = ("wallpaper", "theme", "transcoded", "lock screen", "lockscreen", "personaliz", "photos", "spotlight",
+             "slideshow", "background", "\\dwm", "accent", "logonui", "control panel\\desktop", "assetmanager")
+ETW_WRITE_MARKS = ("setvalue", "deletevalue", "deletekey", "createkey", "renamekey", "setkeysecurity", "writefile",
+                   "setinformation", "setdisposition", "setrename", "deletefile", "setsecurity")
+ETW_SKIP_KEYS = frozenset(("EventHeader", "Descriptor", "ProviderId", "ProviderName", "Provider Name", "Task Name"))
+
+
+class EtwRawSource(Source):
+    name = SRC_ETW
+    session_name = "Bastard ETW Trace"
+
+    def start(self):
+        self.job = None
+        self.count = 0
+        if not IS_WIN:
+            self.status("off", "Windows only")
+            return
+        if etw_core is None or EtwGuid is None:
+            self.status("off", "pywintrace missing")
+            self.note("install pywintrace to record the ETW providers", INFO)
+            return
+        self.status("starting", "opening providers")
+        self.spawn(self._run, "trace")
+
+    def _providers(self):
+        providers = []
+        used = []
+        for pname, guid, kernel in ETW_RAW_PROVIDERS:
+            if kernel and not self.session.admin:
+                continue
+            try:
+                providers.append(etw_core.ProviderInfo(pname, EtwGuid(guid), 5, 0xffffffffffffffff))
+                used.append(pname)
+            except Exception as exc:
+                self.note("provider %s is not available: %s" % (pname, one_line(exc, 120)), WARN)
+        return providers, used
+
+    def _run(self):
+        providers, used = self._providers()
+        if not providers:
+            self.status("off", "no providers available")
+            if IS_WIN and not self.session.admin:
+                self.note("the kernel providers need administrator, so ETW stayed off", WARN)
+            return
+        self._stop_session()
+        try:
+            self.job = etw_core.ETW(session_name=self.session_name, providers=providers, event_callback=self._on)
+            self.job.start()
+        except Exception as exc:
+            self.job = None
+            self.status("failed", one_line(exc, 60))
+            self.note("the ETW session could not start: %s" % one_line(exc, 200), ERROR)
+            return
+        self.status("running", ", ".join(used))
+        self.note("watching " + plural(len(used), "provider"), INFO, "\n".join(used))
+        while not self.stopping():
+            self.wait(1.0)
+
+    def _on(self, item):
+        try:
+            event_id, data = item
+        except Exception:
+            return
+        try:
+            if not isinstance(data, dict):
+                return
+            header = data.get("EventHeader") or {}
+            raw_time = header.get("TimeStamp")
+            ts = filetime_to_epoch(raw_time) if raw_time else time.time()
+            if abs(ts - time.time()) > 86400:
+                ts = time.time()
+            pid = as_int(header.get("ProcessId"), 0) or as_int(data.get("ProcessId"), 0)
+            provider = data.get("ProviderName") or data.get("Provider Name") or ""
+            if not provider:
+                provider = ETW_GUID_NAMES.get(str(header.get("ProviderId") or "").upper(), "")
+            parts = []
+            for key, value in data.items():
+                if key in ETW_SKIP_KEYS:
+                    continue
+                text = one_line(value, 160)
+                if text:
+                    parts.append("%s=%s" % (key, text))
+            detail = " | ".join(parts)
+            blob = (str(provider) + " " + detail).lower()
+            denied = "denied" in blob or "0x8007" in blob or "0xc0000022" in blob
+            write = any(mark in blob for mark in ETW_WRITE_MARKS)
+            scope = any(mark in blob for mark in ETW_SCOPE)
+            if not (denied or write or scope):
+                return
+            level = ERROR if denied else (CHANGE if write else INFO)
+            label = provider or "ETW"
+            low = label.lower()
+            kind = KIND_REG if "registry" in low else (KIND_FILE if "file" in low else KIND_ETW)
+            body = "Provider: %s\nEvent ID: %s" % (label, event_id)
+            if detail:
+                body += "\n" + detail
+            self.emit(kind, one_line("[%s] %s" % (label, detail or ("event %s" % event_id)), 600), level,
+                      pid=pid or None, detail=body, ts=ts)
+            self.count += 1
+        except Exception:
+            pass
+
+    def _stop_session(self):
+        try:
+            etw_core.ETW(session_name=self.session_name).control_stop(etw_core.TraceProperties())
+        except Exception:
+            pass
+
+    @staticmethod
+    def _stop_job(job):
+        try:
+            job.stop()
+        except Exception as exc:
+            LOG.warning("ETW raw trace did not stop cleanly: %s", exc)
+
+    def finish(self):
+        job, self.job = self.job, None
+        if job is not None:
+            worker = threading.Thread(target=self._stop_job, args=(job,), name="etw raw stop", daemon=True)
+            worker.start()
+            worker.join(10.0)
+            if worker.is_alive():
+                LOG.warning("ETW raw trace is still stopping after 10 seconds")
+        self._stop_session()
+
+
+WMI_REG_TARGETS = (
+    ("HKEY_CURRENT_USER", "Control Panel\\Desktop", "WallPaper"),
+    ("HKEY_CURRENT_USER", "Control Panel\\Desktop", "WallpaperStyle"),
+    ("HKEY_CURRENT_USER", "Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Wallpapers", "BackgroundType"),
+    ("HKEY_CURRENT_USER", "Software\\Microsoft\\Windows\\CurrentVersion\\Themes", "CurrentTheme"),
+)
+
+
+class WmiSource(Source):
+    name = SRC_WMI
+
+    def start(self):
+        self.timeout_exc = None
+        if not IS_WIN:
+            self.status("off", "Windows only")
+            return
+        if wmi_module is None or pythoncom is None:
+            self.status("off", "wmi or pywin32 missing")
+            self.note("install wmi and pywin32 to use the WMI watchers", INFO)
+            return
+        self.timeout_exc = getattr(wmi_module, "x_wmi_timed_out", None)
+        self.status("starting", "connecting")
+        self.spawn(self._proc_watch, "process")
+        self.spawn(self._reg_watch, "registry")
+
+    def _is_timeout(self, exc):
+        return self.timeout_exc is not None and isinstance(exc, self.timeout_exc)
+
+    def _proc_watch(self):
+        pythoncom.CoInitialize()
+        try:
+            conn = wmi_module.WMI()
+            watcher = conn.Win32_Process.watch_for("creation")
+            self.status("running", "process and registry")
+            while not self.stopping():
+                try:
+                    hit = watcher(timeout_ms=1000)
+                except Exception as exc:
+                    if self._is_timeout(exc):
+                        continue
+                    if self.stopping():
+                        break
+                    self.note("WMI process watcher stopped: %s" % one_line(exc, 200), WARN)
+                    break
+                if not hit:
+                    continue
+                pid = as_int(getattr(hit, "ProcessId", 0), 0)
+                name = getattr(hit, "Name", "") or ""
+                cmd = getattr(hit, "CommandLine", "") or ""
+                detail = "Name: %s\nPID: %s\nCommand line: %s" % (name, pid, cmd)
+                self.emit(KIND_PROC, "WMI saw a new process: %s" % process_label(name, pid), INFO,
+                          pid=pid or None, proc=name, detail=detail)
+        except Exception as exc:
+            self.status("warn", "process watcher failed")
+            self.note("WMI process watcher could not run: %s" % one_line(exc, 200), WARN)
+        finally:
+            try:
+                pythoncom.CoUninitialize()
+            except Exception:
+                pass
+
+    def _reg_watch(self):
+        pythoncom.CoInitialize()
+        try:
+            conn = wmi_module.WMI()
+            watchers = []
+            for hive, path, name in WMI_REG_TARGETS:
+                try:
+                    watchers.append((conn.RegistryValueChangeEvent.watch_for(Hive=hive, KeyPath=path, ValueName=name),
+                                     hive, path, name))
+                except Exception:
+                    pass
+            if not watchers:
+                self.note("WMI registry change events are off here, the Registry source still watches these keys", INFO)
+                return
+            while not self.stopping():
+                for watcher, hive, path, name in watchers:
+                    if self.stopping():
+                        break
+                    try:
+                        hit = watcher(timeout_ms=500)
+                    except Exception as exc:
+                        if self._is_timeout(exc):
+                            continue
+                        continue
+                    if hit:
+                        self.emit(KIND_REG, "WMI change: %s\\%s [%s]" % (hive, path, name), CHANGE,
+                                  detail="Hive: %s\nKey: %s\nValue: %s" % (hive, path, name))
+        except Exception as exc:
+            self.note("WMI registry watcher could not run: %s" % one_line(exc, 200), WARN)
+        finally:
+            try:
+                pythoncom.CoUninitialize()
+            except Exception:
+                pass
+
+
+PROBE_POLICY_KEYS = (
+    ("HKLM", "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Policies\\ActiveDesktop", "NoChangingWallpaper"),
+    ("HKLM", "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Policies\\System", "NoDispBackgroundPage"),
+    ("HKLM", "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Policies\\System", "DisableLogonBackgroundImage"),
+    ("HKLM", "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Policies\\System", "Wallpaper"),
+    ("HKLM", "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Policies\\System", "WallpaperStyle"),
+    ("HKLM", "SOFTWARE\\Policies\\Microsoft\\Windows\\Personalization", "NoLockScreen"),
+    ("HKLM", "SOFTWARE\\Policies\\Microsoft\\Windows\\Personalization", "NoChangingLockScreen"),
+    ("HKLM", "SOFTWARE\\Policies\\Microsoft\\Windows\\Personalization", "NoChangingWallpaper"),
+    ("HKLM", "SOFTWARE\\Policies\\Microsoft\\Windows\\Personalization", "LockScreenImage"),
+    ("HKCU", "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Policies\\ActiveDesktop", "NoChangingWallpaper"),
+    ("HKCU", "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Policies\\System", "NoDispBackgroundPage"),
+    ("HKCU", "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Policies\\System", "Wallpaper"),
+    ("HKCU", "SOFTWARE\\Policies\\Microsoft\\Windows\\Personalization", "NoChangingWallpaper"),
+    ("HKLM", "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\PersonalizationCSP", "LockScreenImagePath"),
+    ("HKLM", "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\PersonalizationCSP", "LockScreenImageUrl"),
+    ("HKLM", "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\PersonalizationCSP", "DesktopImagePath"),
+    ("HKLM", "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\PersonalizationCSP", "DesktopImageUrl"),
+)
+PROBE_APPPRIVACY = ("LetAppsAccessAccountInfo", "LetAppsAccessUserData", "LetAppsAccessPicturesLibrary",
+                    "LetAppsAccessDocumentsLibrary", "LetAppsRunInBackground", "LetAppsAccessCamera",
+                    "LetAppsAccessLocation")
+PROBE_APPPRIVACY_WORDS = {0: "0 (user in control)", 1: "1 (force allow)", 2: "2 (force deny)"}
+PROBE_CONSENT = ("userAccountInformation", "picturesLibrary", "documentsLibrary", "broadFileSystemAccess",
+                 "graphicsCaptureProgrammatic")
+PROBE_DISALLOW = ("photos.exe", "runtimebroker.exe", "systemsettings.exe", "backgroundtaskhost.exe",
+                  "applicationframehost.exe", "winrt.runtime.dll")
+PROBE_IFEO = ("RuntimeBroker.exe", "SystemSettings.exe", "Photos.exe", "ApplicationFrameHost.exe")
+PROBE_SHELL_VERBS = (
+    ("HKCR", "SystemFileAssociations\\.jpg\\shell\\setaswallpaper"),
+    ("HKCR", "SystemFileAssociations\\.jpeg\\shell\\setaswallpaper"),
+    ("HKCR", "SystemFileAssociations\\.png\\shell\\setaswallpaper"),
+    ("HKCR", "SystemFileAssociations\\image\\shell\\setaswallpaper"),
+    ("HKCR", "jpegfile\\shell\\setaswallpaper"),
+    ("HKCR", "pngfile\\shell\\setaswallpaper"),
+    ("HKCR", "Paint.Picture\\shell\\setaswallpaper"),
+    ("HKCU", "Software\\Classes\\SystemFileAssociations\\.jpg\\shell\\setaswallpaper"),
+)
+PROBE_IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".bmp")
+PROBE_SERVICES = ("Themes", "AppXSvc", "ClipSVC", "StateRepository", "TokenBroker", "Dwm", "ShellHWDetection",
+                  "ShellExperienceHost")
+WINRT_SCRIPT = (
+    "$ErrorActionPreference='SilentlyContinue';",
+    "try { [void][Windows.System.UserProfile.UserProfilePersonalizationSettings,Windows.System.UserProfile,"
+    "ContentType=WindowsRuntime];",
+    "$s=[Windows.System.UserProfile.UserProfilePersonalizationSettings]::IsSupported();",
+    "Write-Output ('IsSupported=' + $s); } catch { Write-Output ('ERR:' + $_.Exception.Message) }",
+    "try { $img=[Windows.System.UserProfile.LockScreen,Windows.System.UserProfile,ContentType=WindowsRuntime]"
+    "::OriginalImageFile;",
+    "Write-Output ('LockScreenOriginalImageFile=' + $img); } catch { Write-Output ('ERR2:' + $_.Exception.Message) }",
+    "try { $pkg=Get-AppxPackage Microsoft.Windows.Photos | Select-Object Name,Status,Version,PackageFullName |",
+    "ConvertTo-Json -Compress; Write-Output ('PHOTOS=' + $pkg); } catch { Write-Output ('ERR3:'"
+    " + $_.Exception.Message) }",
+    "try { $caps=(Get-AppxPackage Microsoft.Windows.Photos).Capabilities;",
+    "Write-Output ('PHOTOSCAPS=' + ($caps -join ',')); } catch { Write-Output ('ERR4:' + $_.Exception.Message) }",
+)
+
+
+class ProbeSource(Source):
+    name = SRC_PROBE
+
+    def start(self):
+        if not IS_WIN:
+            self.status("off", "Windows only")
+            return
+        self.status("starting", "reading settings")
+        self.spawn(self._run, "probe")
+
+    def _run(self):
+        probes = (self._policy, self._appprivacy, self._consentstore, self._disallowrun, self._ifeo,
+                  self._shell_verbs, self._winrt, self._transcode_write, self._acl, self._services,
+                  self._explorer_hints)
+        for probe in probes:
+            if self.stopping():
+                break
+            try:
+                probe()
+            except Exception as exc:
+                self.emit(KIND_PROBE, "probe %s failed: %s" % (probe.__name__, one_line(exc, 160)), WARN)
+        self.status("idle", "settings read once at start")
+
+    def _say(self, text, level=INFO, detail=""):
+        self.emit(KIND_PROBE, one_line(text, 240), level, detail=detail)
+
+    def _policy(self):
+        self._say("A: personalization policy keys")
+        for hive, path, name in PROBE_POLICY_KEYS:
+            value = reg_read_value(hive_handle(hive), path, name)
+            if value is None:
+                self._say("%s %s [%s] = unset" % (hive, path, name))
+            else:
+                self._say("%s %s [%s] = %s" % (hive, path, name, value), CHANGE,
+                          detail="%s\\%s\nValue: %s = %s" % (hive, path, name, value))
+
+    def _appprivacy(self):
+        self._say("B: AppPrivacy policy")
+        path = "SOFTWARE\\Policies\\Microsoft\\Windows\\AppPrivacy"
+        hive = hive_handle("HKLM")
+        if not reg_key_exists(hive, path):
+            self._say("AppPrivacy key is not there")
+            return
+        for name in PROBE_APPPRIVACY:
+            value = reg_read_value(hive, path, name)
+            if value is None:
+                continue
+            word = PROBE_APPPRIVACY_WORDS.get(as_int(value), str(value))
+            level = ERROR if as_int(value) == 2 else INFO
+            self._say("AppPrivacy [%s] = %s" % (name, word), level)
+
+    def _consentstore(self):
+        self._say("C: ConsentStore capability access")
+        base = "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\CapabilityAccessManager\\ConsentStore"
+        for tag in ("HKLM", "HKCU"):
+            hive = hive_handle(tag)
+            for cap in PROBE_CONSENT:
+                value = reg_read_value(hive, base + "\\" + cap, "Value")
+                if value is None:
+                    self._say("%s %s = unset" % (tag, cap))
+                elif str(value) == "Deny":
+                    self._say("%s %s = Deny" % (tag, cap), ERROR)
+                else:
+                    self._say("%s %s = %s" % (tag, cap, value))
+
+    def _disallowrun(self):
+        self._say("D: DisallowRun policy")
+        hive = hive_handle("HKCU")
+        path = "Software\\Microsoft\\Windows\\CurrentVersion\\Policies\\Explorer"
+        flag = reg_read_value(hive, path, "DisallowRun")
+        self._say("DisallowRun = %s" % ("unset" if flag is None else flag))
+        sub = path + "\\DisallowRun"
+        if not reg_key_exists(hive, sub):
+            return
+        try:
+            handle = winreg.OpenKey(hive, sub, 0, winreg.KEY_READ)
+        except OSError:
+            return
+        with handle:
+            index = 0
+            while True:
+                try:
+                    name, value, _kind = winreg.EnumValue(handle, index)
+                except OSError:
+                    break
+                index += 1
+                level = ERROR if str(value).lower() in PROBE_DISALLOW else INFO
+                self._say("DisallowRun [%s] = %s" % (name, value), level)
+
+    def _ifeo(self):
+        self._say("E: Image File Execution Options")
+        hive = hive_handle("HKLM")
+        base = "SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options"
+        for exe in PROBE_IFEO:
+            path = base + "\\" + exe
+            if not reg_key_exists(hive, path):
+                continue
+            debugger = reg_read_value(hive, path, "Debugger")
+            if debugger:
+                self._say("IFEO %s Debugger = %s" % (exe, debugger), ERROR)
+            options = reg_read_value(hive, path, "MitigationOptions")
+            if options is not None:
+                try:
+                    number = int.from_bytes(options, "little") if isinstance(options, bytes) else int(options)
+                except Exception:
+                    number = 0
+                blocked = bool(number & (1 << 44))
+                self._say("IFEO %s MitigationOptions = 0x%x%s" % (exe, number,
+                          " (blocks non Microsoft binaries)" if blocked else ""),
+                          WARN if blocked else INFO)
+
+    def _shell_verbs(self):
+        self._say("F: set as wallpaper verb and image associations")
+        found = 0
+        for tag, path in PROBE_SHELL_VERBS:
+            hive = hive_handle(tag)
+            if not reg_key_exists(hive, path):
+                continue
+            found += 1
+            command = reg_read_value(hive, path + "\\command", "")
+            self._say("%s %s command = %s" % (tag, path, command if command else "(default)"), CHANGE)
+        if not found:
+            self._say("no setaswallpaper verb found in the usual places", ERROR)
+        for ext in PROBE_IMAGE_EXTS:
+            progid = reg_read_value(hive_handle("HKCR"), ext, "")
+            if not progid:
+                self._say("%s has no ProgID" % ext, ERROR)
+                continue
+            verbs = []
+            try:
+                handle = winreg.OpenKey(hive_handle("HKCR"), "%s\\shell" % progid, 0, winreg.KEY_READ)
+            except OSError:
+                self._say("%s -> %s but %s\\shell is missing" % (ext, progid, progid), ERROR)
+                continue
+            with handle:
+                index = 0
+                while True:
+                    try:
+                        verbs.append(winreg.EnumKey(handle, index))
+                    except OSError:
+                        break
+                    index += 1
+            self._say("%s -> %s verbs: %s" % (ext, progid, ", ".join(verbs[:15]) or "(none)"), CHANGE)
+
+    def _winrt(self):
+        self._say("G: WinRT lock screen and Photos package")
+        code, out = run_text(["powershell", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+                              "-WindowStyle", "Hidden", "-Command", "".join(WINRT_SCRIPT)], 40)
+        if code is None:
+            self._say("WinRT read failed: %s" % out, WARN)
+            return
+        for line in out.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            level = ERROR if "IsSupported=False" in line else (WARN if line.startswith("ERR") else INFO)
+            self._say(line, level)
+
+    def _transcode_write(self):
+        self._say("H: TranscodedWallpaper write test")
+        path = os.path.join(os.environ.get("APPDATA", ""), "Microsoft", "Windows", "Themes", "TranscodedWallpaper")
+        if not os.path.isfile(path):
+            self._say("TranscodedWallpaper is not there: %s" % path, WARN)
+            return
+        try:
+            with open(path, "ab") as handle:
+                handle.write(b"")
+            self._say("TranscodedWallpaper is writable", INFO, detail=path)
+        except PermissionError as exc:
+            self._say("TranscodedWallpaper write denied: %s" % one_line(exc, 160), ERROR, detail=path)
+        except Exception as exc:
+            self._say("TranscodedWallpaper write test: %s" % one_line(exc, 160), WARN, detail=path)
+
+    def _acl(self):
+        self._say("I: ACL of Control Panel Desktop")
+        code, out = run_text(["icacls", "HKCU\\Control Panel\\Desktop"], 20)
+        if code is None:
+            self._say("icacls failed: %s" % out, WARN)
+            return
+        for line in out.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            level = ERROR if "DENY" in line.upper() else INFO
+            self._say("icacls: " + line, level)
+
+    def _services(self):
+        self._say("J: services")
+        for svc in PROBE_SERVICES:
+            code, out = run_text(["sc", "query", svc], 10)
+            if code is None:
+                self._say("sc query %s failed: %s" % (svc, out), WARN)
+                continue
+            state = ""
+            for line in out.splitlines():
+                if "STATE" in line:
+                    state = line.strip()
+                    break
+            if "RUNNING" in state:
+                self._say("%s %s" % (svc, state))
+            elif "STOPPED" in state:
+                self._say("%s %s" % (svc, state), WARN)
+            else:
+                self._say("%s %s" % (svc, state or "state unknown"), WARN)
+
+    def _explorer_hints(self):
+        self._say("K: Explorer policy hints")
+        value = reg_read_value(hive_handle("HKCU"),
+                               "Software\\Microsoft\\Windows\\CurrentVersion\\Policies\\Explorer",
+                               "ForceClassicControlPanel")
+        if value is not None:
+            self._say("ForceClassicControlPanel = %s" % value)
+        value = reg_read_value(hive_handle("HKLM"),
+                               "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Policies\\Explorer", "NoActiveDesktop")
+        if value is not None:
+            self._say("NoActiveDesktop = %s" % value)
+
+
+TRACE_PROVIDER_LINE = "{%s} 0xffffffffffffffff 5"
+TRACE_SCOPE = ETW_SCOPE
+
+
+class TraceToolSource(Source):
+    name = SRC_TRACE
+    logman_session = "BastardTrace"
+
+    def start(self):
+        self.mode = ""
+        self.etl = ""
+        self.started_ok = False
+        if not IS_WIN:
+            self.status("off", "Windows only")
+            return
+        if not self.session.admin:
+            self.status("off", "needs administrator")
+            self.note("logman and WPR captures need administrator", WARN)
+            return
+        self.status("starting", "launching")
+        self.spawn(self._run, "capture")
+
+    def _run(self):
+        os.makedirs(TRACE_DIR, exist_ok=True)
+        if self._start_logman() or self._start_wpr():
+            self.started_ok = True
+            self.status("running", "%s capturing" % self.mode)
+            self.note("%s is capturing to %s" % (self.mode, self.etl), INFO)
+        else:
+            self.status("off", "no trace tool started")
+            self.note("neither logman nor WPR could start a capture", WARN)
+            return
+        while not self.stopping():
+            self.wait(1.0)
+
+    def _start_logman(self):
+        self.etl = os.path.join(TRACE_DIR, "Bastard_logman_%s.etl" % self.session.stamp_text)
+        provider_file = os.path.join(TRACE_DIR, "Bastard_providers_%s.txt" % self.session.stamp_text)
+        try:
+            with open(provider_file, "w", encoding="utf-8") as handle:
+                for _name, guid, _kernel in ETW_RAW_PROVIDERS:
+                    handle.write(TRACE_PROVIDER_LINE % guid.strip("{}") + "\n")
+        except Exception as exc:
+            self.note("logman provider file failed: %s" % one_line(exc, 160), WARN)
+            return False
+        run_text(["logman", "stop", self.logman_session, "-ets"], 20)
+        code, out = run_text(["logman", "create", "trace", self.logman_session, "-ow", "-o", self.etl, "-pf",
+                              provider_file, "-nb", "16", "16", "-bs", "1024", "-ets"], 30)
+        if code != 0:
+            self.note("logman create did not work: %s" % one_line(out, 200), INFO)
+            return False
+        self.mode = "logman"
+        return True
+
+    def _start_wpr(self):
+        self.etl = os.path.join(TRACE_DIR, "Bastard_wpr_%s.etl" % self.session.stamp_text)
+        code, out = run_text(["wpr", "-start", "FileIO", "-start", "Registry", "-filemode"], 40)
+        if code != 0:
+            self.note("WPR start did not work: %s" % one_line(out, 200), INFO)
+            return False
+        self.mode = "WPR"
+        return True
+
+    def _stop_capture(self):
+        if self.mode == "logman":
+            run_text(["logman", "stop", self.logman_session, "-ets"], 40)
+        elif self.mode == "WPR":
+            run_text(["wpr", "-stop", self.etl], 90)
+
+    def finish(self):
+        if not self.started_ok:
+            return
+        self.status("finishing", "stopping %s" % self.mode)
+        self._stop_capture()
+        if self.session.abort_event.is_set():
+            return
+        if not self.etl or not os.path.isfile(self.etl):
+            self.status("failed", "no capture file")
+            self.note("%s wrote no capture file" % self.mode, WARN)
+            return
+        csv_path = os.path.splitext(self.etl)[0] + ".csv"
+        self.status("finishing", "decoding with tracerpt")
+        code, out = run_text(["tracerpt", self.etl, "-of", "CSV", "-o", csv_path, "-y"], 180)
+        if code != 0 or not os.path.isfile(csv_path):
+            self.status("failed", "tracerpt failed")
+            self.note("tracerpt could not decode the capture: %s" % one_line(out, 200), WARN,
+                      detail="Capture file: " + self.etl)
+            return
+        self._publish(csv_path)
+
+    def _publish(self, csv_path):
+        listed = 0
+        total = 0
+        try:
+            for row in procmon_csv_rows(csv_path):
+                total += 1
+                line = " | ".join("%s=%s" % (k, v) for k, v in row.items() if v and str(v).strip())
+                low = line.lower()
+                denied = "denied" in low or "0x8007" in low
+                if not (denied or any(mark in low for mark in TRACE_SCOPE)):
+                    continue
+                listed += 1
+                if listed > PROCMON_ROW_LIMIT:
+                    break
+                self.emit(KIND_ETW, one_line("%s: %s" % (self.mode, line), 600),
+                          ERROR if denied else INFO, detail=one_line(line, 2000))
+        except Exception as exc:
+            self.note("the %s capture could not be read: %s" % (self.mode, one_line(exc, 160)), WARN)
+            return
+        self.note("%s listed %d of %s" % (self.mode, listed, plural(total, "row")), INFO,
+                  "Capture file: %s" % self.etl)
+        self.status("idle", "%d listed" % listed)
+
+SOURCE_TYPES = (RegistrySource, FilesSource, ProcessSource, WindowsSource, EtwRawSource, WmiSource, EventLogSource,
+                WallpaperSource, ProbeSource, ProcMonSource, TraceToolSource)
 SOURCE_NAMES = [kind.name for kind in SOURCE_TYPES]
 
 

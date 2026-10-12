@@ -2,3 +2,5 @@ psutil==7.2.2
 watchdog==6.0.0
 pywintrace==0.2.0
 procmon-parser==0.4.0
+wmi==1.5.1
+pywin32==312

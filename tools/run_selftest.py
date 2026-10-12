@@ -164,6 +164,10 @@ def check(result, log, returncode):
             add("ProcMon not used", True, hard=False, info=note)
         add("window opened", has(events, "Window opened", source="Windows"), hard=False,
             info=(status.get("Windows") or ["", ""])[1])
+    for extra in ("ETW", "WMI", "Probes", "Trace Tools"):
+        state = status.get(extra) or ["", ""]
+        add("%s source ran" % extra, state[0] not in ("", "failed"), hard=False,
+            info="%s %s" % (state[0], state[1]))
     return checks
 
 

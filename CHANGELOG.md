@@ -1,5 +1,20 @@
 # Changelog
 
+## 1.1.0
+
+- Bastard 1.1.0 reads every channel the earlier versions read and shows all of it unfiltered, so you can sift the noise yourself.
+- ETW follows the Kernel-Registry, Kernel-File, Shell-Core, Immersive-Shell and Themes providers live and lists their events.
+- ProcMon now also lists reads and lookups on the wallpaper, theme, Photos and lock screen paths, not only writes and denials.
+- ProcMon no longer groups repeats, so every captured operation shows on its own line.
+- Registry now also watches the LogonUI background, the ActivatableClasses packages, the Personalization policies and the System policies.
+- Files now also watches the Explorer folder under Local AppData and reports every change the moment it arrives.
+- Windows now records a line when a window is first created, on top of in front, opened, shown and closed.
+- WMI reports new processes and wallpaper value changes the way Windows itself sees them.
+- Probes reads the personalization and app privacy policies, the consent store, DisallowRun, image options, services and permissions at start.
+- Probes reads the Set as desktop background menu entry, the image file associations and the Photos package name, version and status.
+- Probes reads the lock screen image path and whether Windows still reports the wallpaper can be set.
+- Trace Tools records the same providers with logman, or WPR when logman will not start, and reads them back with tracerpt.
+
 ## 1.0.0
 
 - Bastard 1.0.0 is a monitor: it watches and records what happens on the PC and never changes a setting, an app or Windows.
