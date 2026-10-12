@@ -346,7 +346,7 @@ class Timeline(unittest.TestCase):
             self.assertEqual(back.lines, [])
             self.assertFalse(back.blocks("ProcMon", b.INFO, "read QueryOpen C:\\x.dll"))
             kept = b.load_exclusions(path)
-            kept.set_lines([line for line in b.DEFAULT_EXCLUSIONS if not line.startswith("ProcMon")])
+            kept.set_lines(list(b.DEFAULT_EXCLUSIONS)[1:])
             b.save_exclusions(kept, path)
             self.assertEqual(len(b.load_exclusions(path).lines), len(b.DEFAULT_EXCLUSIONS) - 1)
         finally:
@@ -357,9 +357,9 @@ class Timeline(unittest.TestCase):
         self.assertFalse(rules.blocks(b.SRC_TRACE, b.INFO, "logman: EventName=FileIo | Type=Read | PID=4"))
         self.assertTrue(hasattr(b.TraceToolSource, "_leave_it_to_etw"))
 
-    def test_the_defaults_are_the_four_the_owner_asked_for(self):
+    def test_the_defaults_are_the_five_the_owner_asked_for(self):
         rules = b.Exclusions(b.DEFAULT_EXCLUSIONS)
-        self.assertEqual(len(rules.rules), 4)
+        self.assertEqual(len(rules.rules), 5)
         self.assertTrue(rules.blocks(b.SRC_PM, b.INFO,
                                      "read RegQueryValue HKCU\\SOFTWARE\\Microsoft\\Windows\\DWM"
                                      "\\ColorPrevalence"))
@@ -584,6 +584,20 @@ class Timeline(unittest.TestCase):
                 break
         self.assertEqual([ev.text for ev in seen], ["one"])
         self.assertEqual(hub.late, 50)
+
+    def test_the_defaults_leave_the_chrome_rows_out(self):
+        rules = b.Exclusions(b.DEFAULT_EXCLUSIONS)
+        self.assertTrue(rules.blocks(b.SRC_PM, b.INFO, "RegQueryValue HKCU\\Software", "chrome.exe"))
+        self.assertTrue(rules.blocks(b.SRC_PM, b.CHANGE, "WriteFile C:\\Temp\\a", "Chrome.exe"))
+        self.assertTrue(rules.blocks(b.SRC_PM, b.ERROR, "QueryOpen C:\\x", "chrome.exe"))
+        self.assertFalse(rules.blocks(b.SRC_PM, b.INFO, "RegQueryValue HKCU\\Software", "explorer.exe"))
+        self.assertFalse(rules.blocks(b.SRC_PROC, b.INFO, "Started chrome.exe (PID 7)", "chrome.exe"))
+
+    def test_the_log_limit_fits_under_a_thirty_million_byte_upload(self):
+        self.assertEqual(b.DEFAULT_LOG_MB, 28)
+        rules = b.Exclusions()
+        self.assertEqual(rules.log_bytes(), 28 * 1024 * 1024)
+        self.assertLess(rules.log_bytes(), 30000000)
 
     def test_marker_summary(self):
         text, level, _ = b.marker_summary(2, 100.0, [event(99.0), event(107.0)])

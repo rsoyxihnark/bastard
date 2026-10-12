@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.5.4
+
+- Bastard 1.5.4 keeps the trace log small enough to attach, and leaves the Chrome rows out of the timeline.
+- The trace log now stops at 28 MB, so a finished log fits under a 30 MB upload limit with room to spare.
+- The filter now starts with every ProcMon row from chrome.exe left out.
+
 ## 1.5.3
 
 - Bastard 1.5.3 keeps the Kernel-File writes and the refused file operations, and leaves only the reads out.

@@ -25,7 +25,7 @@ import tkinter as tk
 import tkinter.font as tkfont
 from tkinter import filedialog, messagebox, ttk
 
-VERSION = "1.5.3"
+VERSION = "1.5.4"
 
 APP_NAME = "Bastard"
 IS_WIN = os.name == "nt"
@@ -870,7 +870,7 @@ class Store:
         return items[low:high]
 
 
-DEFAULT_LOG_MB = 30
+DEFAULT_LOG_MB = 28
 LOG_FOOTER_ROOM = 65536
 PROCMON_ROW_LIMIT = 1000000
 EXCLUSION_PARTS = 4
@@ -879,6 +879,7 @@ DEFAULT_EXCLUSIONS = (
     "| | DisallowRun",
     "| | Certificates",
     "ETW | info | Kernel-File",
+    "ProcMon | | chrome.exe",
 )
 EXCLUSION_HELP = (
     "One rule per line: source | level | the text it holds | the text that keeps it",
