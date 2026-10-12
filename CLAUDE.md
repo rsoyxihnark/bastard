@@ -62,8 +62,26 @@ active repairs (shell verb restore, Photos re-register, a wallpaper test
 write); they were left out on purpose. Ask before adding anything that
 writes, even an idempotent write, because it softens that promise.
 
-ETW, ProcMon and Trace Tools are the loud sources: a 32 second trace
-produces over a million events from them while the signal worth finding is
-a few hundred. The in-memory timeline caps their reads at four fifths of
-its room so the quiet sources and every denial and write keep their place.
-The log on the Desktop always holds the whole run.
+ETW, ProcMon and Trace Tools are the loud sources: unfiltered, a 32 second
+trace produces over a million events from them while the signal worth
+finding is a few hundred. Two things hold that back.
+
+The in-memory timeline caps their reads at four fifths of its room, so the
+quiet sources and every denial and write keep their place.
+
+Since 1.3.0 a filter drops events at ingest, before the timeline and
+before the log, driven by `Exclusions.ini` next to the program. Its rules
+read `source | level | the text it holds | the text that keeps it`, and
+the level is what separates noise from signal in the loud sources: `info`
+is reads, `change` is writes, `error` is denials. The three defaults cut a
+real CI run from 1,284,000 events to 15,439 and its self-test from 276 to
+155 seconds, with all 30 hard checks still passing.
+
+Never let a default rule catch anything `tools/run_selftest.py` checks
+for; `test_default_exclusions_keep_what_the_selftest_looks_for` guards
+that, so extend it when the defaults change. System events are exempt
+from every rule.
+
+The trace log is written next to the program, not to the Desktop, it holds
+what the filter let through rather than the whole run, and the Options
+button caps its size at 30 MB.
