@@ -25,7 +25,7 @@ import tkinter as tk
 import tkinter.font as tkfont
 from tkinter import filedialog, messagebox, ttk
 
-VERSION = "1.4.2"
+VERSION = "1.5.0"
 
 APP_NAME = "Bastard"
 IS_WIN = os.name == "nt"
@@ -679,8 +679,9 @@ class Hub:
 
     def emit(self, source, kind, text, level=INFO, pid=None, proc="", detail="", ts=None):
         text = clean_text(text)
+        proc = clean_text(proc)
         rules = self.exclusions
-        if rules is not None and rules.blocks(source, level, text):
+        if rules is not None and rules.blocks(source, level, text, proc):
             return None
         original = ts
         ts, fine = sane_time(ts)
@@ -688,7 +689,6 @@ class Hub:
             self.bad_times.add(source)
             LOG.warning("%s gave an event time that cannot be right (%r), so the time it arrived is used: %s",
                         source, original, one_line(text, 120))
-        proc = clean_text(proc)
         detail = clean_text(detail)
         with self.lock:
             self.seq += 1
@@ -875,6 +875,7 @@ DEFAULT_EXCLUSIONS = (
 EXCLUSION_HELP = (
     "One rule per line: source | level | the text it holds | the text that keeps it",
     "An empty part matches anything. The fourth part rescues an event the third one caught.",
+    "The third and fourth parts read the process name as well, so a rule can name a process.",
     "Sources: Registry Files Processes Windows Event Log ProcMon Wallpaper ETW WMI Probes Trace Tools",
     "Levels: info change warn error marker. System events are never left out.",
     "Delete every line to leave nothing out. An empty list stays empty.",
@@ -909,10 +910,12 @@ class Exclusions:
         self.lines = [line.strip() for line in lines if line.strip()]
         self.rules = [rule for rule in (parse_exclusion(line) for line in self.lines) if rule]
 
-    def blocks(self, source, level, text):
+    def blocks(self, source, level, text, proc=""):
         if not self.enabled or source == SRC_SYSTEM or not self.rules:
             return False
         low = (text or "").lower()
+        if proc:
+            low = proc.lower() + " " + low
         name = (source or "").lower()
         mark = (level or "").lower()
         for want_source, want_level, holds, keeps in self.rules:
@@ -975,6 +978,13 @@ def save_exclusions(rules, path=EXCLUSIONS_PATH):
     except OSError as exc:
         LOG.warning("Exclusions could not be written to %s: %s", path, exc)
         return str(exc)
+
+
+def process_exclusion_from(ev):
+    name = (ev.proc or "").strip()
+    if not name:
+        return ""
+    return "%s | | %s" % (ev.source, name[:160])
 
 
 def exclusion_from(ev):
@@ -3981,6 +3991,7 @@ class App:
         self.menu = tk.Menu(self.tree, tearoff=0, bg=Theme.PANEL, fg=Theme.FG,
                             activebackground=Theme.ACCENT, activeforeground=Theme.PANEL, bd=0)
         self.menu.add_command(label="Leave this match out", command=self.exclude_selected)
+        self.menu.add_command(label="Leave this process out", command=self.exclude_process)
         self.menu.add_command(label="Copy", command=self.copy_selection)
         self.menu_row = ""
         self.tree.bind("<Button-3>", self._popup)
@@ -4049,7 +4060,7 @@ class App:
     def _match(self, ev):
         if ev.kind == KIND_MARK:
             return True
-        if self.rules is not None and self.rules.blocks(ev.source, ev.level, ev.text):
+        if self.rules is not None and self.rules.blocks(ev.source, ev.level, ev.text, ev.proc):
             return False
         chip = self.source_chips.get(ev.source)
         if chip is not None and not chip.on:
@@ -4380,14 +4391,32 @@ class App:
         finally:
             self.menu.grab_release()
 
-    def exclude_selected(self):
-        ev = self.store.by_seq.get(int(self.menu_row)) if self.menu_row.isdigit() else None
+    def _menu_event(self):
+        return self.store.by_seq.get(int(self.menu_row)) if self.menu_row.isdigit() else None
+
+    def exclude_process(self):
+        ev = self._menu_event()
         if ev is None:
             return
         if ev.source == SRC_SYSTEM:
             self.flash("System events are never left out")
             return
-        line = exclusion_from(ev)
+        line = process_exclusion_from(ev)
+        if not line:
+            self.flash("That row names no process, so there is nothing to leave out")
+            return
+        self._add_rule(line)
+
+    def exclude_selected(self):
+        ev = self._menu_event()
+        if ev is None:
+            return
+        if ev.source == SRC_SYSTEM:
+            self.flash("System events are never left out")
+            return
+        self._add_rule(exclusion_from(ev))
+
+    def _add_rule(self, line):
         if line in self.rules.lines:
             self.flash("That rule is already in the filter")
             return

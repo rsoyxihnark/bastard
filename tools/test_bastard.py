@@ -471,6 +471,40 @@ class Timeline(unittest.TestCase):
         self.assertTrue(digest.full())
         self.assertFalse(b.ProcmonDigest(999, 25).full())
 
+    def test_a_rule_can_name_a_process(self):
+        rules = b.Exclusions(["ProcMon | | explorer.exe"])
+        self.assertTrue(rules.blocks("ProcMon", b.INFO, "RegQueryValue HKCU\\Software\\Thing", "explorer.exe"))
+        self.assertTrue(rules.blocks("ProcMon", b.CHANGE, "RegSetValue HKCU\\Software", "Explorer.exe"))
+        self.assertFalse(rules.blocks("ProcMon", b.INFO, "RegQueryValue HKCU\\Software", "Photos.exe"))
+        self.assertFalse(rules.blocks("ProcMon", b.INFO, "RegQueryValue HKCU\\Software"))
+        self.assertFalse(rules.blocks("Files", b.INFO, "wrote a file", "explorer.exe"))
+
+    def test_a_process_rule_can_be_held_to_one_level(self):
+        rules = b.Exclusions(["ProcMon | info | explorer.exe"])
+        self.assertTrue(rules.blocks("ProcMon", b.INFO, "RegQueryValue HKCU", "explorer.exe"))
+        self.assertFalse(rules.blocks("ProcMon", b.CHANGE, "RegSetValue HKCU", "explorer.exe"))
+
+    def test_a_text_rule_still_matches_when_a_process_is_given(self):
+        rules = b.Exclusions(list(b.DEFAULT_EXCLUSIONS))
+        self.assertTrue(rules.blocks("ProcMon", b.INFO, "RegQueryValue HKCU\\Software\\Policies DisallowRun",
+                                     "explorer.exe"))
+        self.assertTrue(rules.blocks("ETW", b.INFO, "something Certificates something", "svchost.exe"))
+        self.assertFalse(rules.blocks("ProcMon", b.CHANGE, "RegSetValue HKCU\\Control Panel\\Desktop",
+                                      "explorer.exe"))
+
+    def test_the_process_rule_the_menu_builds(self):
+        ev = event(1.0, b.SRC_PM, "Registry", b.INFO, "RegQueryValue HKCU\\Software\\Thing", "explorer.exe")
+        self.assertEqual(b.process_exclusion_from(ev), "ProcMon | | explorer.exe")
+        rules = b.Exclusions([b.process_exclusion_from(ev)])
+        self.assertTrue(rules.blocks(ev.source, ev.level, ev.text, ev.proc))
+        self.assertEqual(b.process_exclusion_from(event(1.0, b.SRC_ETW, "ETW", b.INFO, "x", "")), "")
+        self.assertEqual(b.process_exclusion_from(event(1.0, b.SRC_ETW, "ETW", b.INFO, "x", "   ")), "")
+
+    def test_a_process_rule_never_silences_the_system_source(self):
+        rules = b.Exclusions(["| | bastard.exe"])
+        self.assertFalse(rules.blocks(b.SRC_SYSTEM, b.INFO, "Trace started", "Bastard.exe"))
+        self.assertTrue(rules.blocks(b.SRC_PROC, b.INFO, "started", "Bastard.exe"))
+
     def test_marker_summary(self):
         text, level, _ = b.marker_summary(2, 100.0, [event(99.0), event(107.0)])
         self.assertEqual(level, b.WARN)

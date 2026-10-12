@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.5.0
+
+- Bastard 1.5.0 can leave a whole process out of the timeline, from the right-click menu or by naming it in a rule.
+- Right-clicking an event now offers Leave this process out, which keeps every line from that process out of the way.
+- A filter rule reads the process name as well as the event text, so a rule can name a process instead of a line.
+- Fixed right-clicking a ProcMon event offering to leave out only that one line instead of the process behind it.
+
 ## 1.4.2
 
 - Bastard 1.4.2 closes ProcMon the quick way first, so the finish is no longer held up at the end of a trace.
