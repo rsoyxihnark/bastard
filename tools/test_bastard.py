@@ -781,6 +781,20 @@ class Timeline(unittest.TestCase):
                                      "RegQueryValue HKCU\\SOFTWARE\\Microsoft\\Windows\\DWM\\ColorPrevalence"))
         self.assertFalse(rules.blocks(b.SRC_PM, b.CHANGE, real.replace("Query", "Set")))
 
+    def test_the_source_chips_follow_the_panel_on_the_left(self):
+        self.assertEqual(list(b.CHIP_SOURCES[:len(b.SOURCE_NAMES)]), list(b.SOURCE_NAMES))
+        self.assertEqual(b.CHIP_SOURCES[len(b.SOURCE_NAMES):], (b.SRC_SYSTEM,))
+        self.assertEqual(len(b.CHIP_SOURCES), len(b.SOURCE_NAMES) + 1)
+        self.assertEqual(len(set(b.CHIP_SOURCES)), len(b.CHIP_SOURCES))
+        for name in b.SOURCE_NAMES:
+            self.assertIn(name, b.CHIP_SOURCES, name)
+
+    def test_every_kind_a_source_can_emit_has_a_chip(self):
+        kinds = {value for name, value in vars(b).items() if name.startswith("KIND_")}
+        self.assertEqual(sorted(kinds - set(b.CHIP_KINDS)), [b.KIND_MARK])
+        self.assertEqual(sorted(set(b.CHIP_KINDS) - kinds), [])
+        self.assertEqual(len(set(b.CHIP_KINDS)), len(b.CHIP_KINDS))
+
     def test_marker_summary(self):
         text, level, _ = b.marker_summary(2, 100.0, [event(99.0), event(107.0)])
         self.assertEqual(level, b.WARN)
@@ -938,6 +952,33 @@ class Window(unittest.TestCase):
         self.assertEqual(app.btn_clear.cget("text"), "Clear")
         self.assertEqual(visual.index(str(app.btn_clear)), visual.index(str(app.btn_filter)) + 1)
         self.assertEqual(visual.index(str(app.btn_options)), visual.index(str(app.btn_clear)) + 1)
+
+    def test_escape_closes_the_filter_and_options_windows(self):
+        scale = b.setup_style(self.root)
+        app = b.App(self.root, b.parse_options([]), scale)
+        self.root.deiconify()
+        self.root.update()
+        for open_it in (app.edit_filter, app.edit_options):
+            open_it()
+            self.root.update()
+            windows = [w for w in self.root.winfo_children() if isinstance(w, b.tk.Toplevel)]
+            self.assertEqual(len(windows), 1, open_it.__name__)
+            window = windows[0]
+            self.assertIn("<Key-Escape>", window.bind())
+            window.event_generate("<Escape>")
+            self.root.update()
+            self.assertEqual([w for w in self.root.winfo_children() if isinstance(w, b.tk.Toplevel)], [],
+                             open_it.__name__)
+
+    def test_the_chip_row_shows_every_source_the_panel_shows(self):
+        scale = b.setup_style(self.root)
+        app = b.App(self.root, b.parse_options([]), scale)
+        self.assertEqual(list(app.rows), list(b.SOURCE_NAMES))
+        chips = list(app.source_chips)
+        self.assertEqual(chips[:len(b.SOURCE_NAMES)], list(b.SOURCE_NAMES))
+        order = [str(chip) for chip in app.source_chips[b.SOURCE_NAMES[0]].master.pack_slaves()]
+        placed = [str(app.source_chips[name]) for name in b.CHIP_SOURCES]
+        self.assertEqual([one for one in order if one in placed], placed)
 
     def test_filters_search_and_selection(self):
         scale = b.setup_style(self.root)

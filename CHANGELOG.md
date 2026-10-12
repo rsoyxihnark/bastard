@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.7.0
+
+- Bastard 1.7.0 shows a button for every source the panel on the left lists, in the same order, and Esc closes a window.
+- The source buttons along the top now follow the panel on the left exactly, so the two never disagree again.
+- ETW, WMI, Probes and Trace Tools have a button of their own now, so their events can be put aside like any other.
+- Esc closes the Filter window and the Options window without saving.
+
 ## 1.6.3
 
 - Bastard 1.6.3 reads who may change the desktop without starting PowerShell, and leaves out the rows that say nothing.

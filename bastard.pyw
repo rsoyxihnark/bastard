@@ -25,7 +25,7 @@ import tkinter as tk
 import tkinter.font as tkfont
 from tkinter import filedialog, messagebox, ttk
 
-VERSION = "1.6.3"
+VERSION = "1.7.0"
 
 APP_NAME = "Bastard"
 IS_WIN = os.name == "nt"
@@ -3685,7 +3685,7 @@ SORT_KEYS = {
     "pid": lambda ev: (ev.pid or 0, ev.ts, ev.seq),
     "event": lambda ev: ((ev.text or "").lower(), ev.ts, ev.seq),
 }
-CHIP_SOURCES = (SRC_REG, SRC_FILES, SRC_PROC, SRC_WIN, SRC_LOG, SRC_PM, SRC_WALL, SRC_SYSTEM)
+CHIP_SOURCES = tuple(SOURCE_NAMES) + (SRC_SYSTEM,)
 CHIP_KINDS = (KIND_REG, KIND_FILE, KIND_PROC, KIND_WIN, KIND_NET, KIND_DESK, KIND_LOG, KIND_ETW, KIND_PROBE,
               KIND_SYS)
 DETAIL_HINT = ("Start (F5) begins a trace. Do what you want to watch, press Marker (F8) at the moment you try it, "
@@ -4551,6 +4551,7 @@ class App:
         window.title("Bastard - " + title)
         window.configure(bg=Theme.PANEL)
         window.transient(self.root)
+        window.bind("<Escape>", lambda _event: window.destroy())
         try:
             window.geometry("+%d+%d" % (self.root.winfo_rootx() + self.px(70),
                                         self.root.winfo_rooty() + self.px(70)))
