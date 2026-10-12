@@ -1,4 +1,5 @@
 import bisect
+import configparser
 import csv
 import ctypes
 import ctypes.wintypes as wt
@@ -24,7 +25,7 @@ import tkinter as tk
 import tkinter.font as tkfont
 from tkinter import filedialog, messagebox, ttk
 
-VERSION = "1.2.3"
+VERSION = "1.3.0"
 
 APP_NAME = "Bastard"
 IS_WIN = os.name == "nt"
@@ -164,10 +165,21 @@ def find_data_dir():
     return os.path.join(os.path.expanduser("~"), "." + APP_NAME.lower())
 
 
+def find_program_dir():
+    try:
+        if getattr(sys, "frozen", False):
+            return os.path.dirname(os.path.abspath(sys.executable))
+        return os.path.dirname(os.path.abspath(__file__))
+    except Exception:
+        return os.getcwd()
+
+
 DESKTOP = find_desktop()
 DATA_DIR = find_data_dir()
+PROGRAM_DIR = find_program_dir()
 TRACE_DIR = os.path.join(DATA_DIR, "Traces")
 SETTINGS_PATH = os.path.join(DATA_DIR, "settings.json")
+EXCLUSIONS_PATH = os.path.join(PROGRAM_DIR, "Exclusions.ini")
 APP_LOG_PATH = os.path.join(DATA_DIR, "Bastard.log")
 LOG = logging.getLogger("bastard")
 
@@ -655,7 +667,8 @@ def marker_summary(number, start, events):
 
 
 class Hub:
-    def __init__(self):
+    def __init__(self, exclusions=None):
+        self.exclusions = exclusions
         self.lock = threading.Lock()
         self.seq = 0
         self.ui = queue.SimpleQueue()
@@ -666,6 +679,9 @@ class Hub:
 
     def emit(self, source, kind, text, level=INFO, pid=None, proc="", detail="", ts=None):
         text = clean_text(text)
+        rules = self.exclusions
+        if rules is not None and rules.blocks(source, level, text):
+            return None
         original = ts
         ts, fine = sane_time(ts)
         if not fine and source not in self.bad_times:
@@ -703,7 +719,7 @@ class Hub:
 
 
 class LogWriter:
-    def __init__(self, path, header):
+    def __init__(self, path, header, max_bytes=0):
         self.path = path
         self.header = list(header)
         self.queue = queue.SimpleQueue()
@@ -711,6 +727,10 @@ class LogWriter:
         self.error = ""
         self.handle = None
         self.thread = None
+        self.max_bytes = max_bytes
+        self.written = 0
+        self.dropped = 0
+        self.capped = False
 
     def start(self):
         try:
@@ -742,8 +762,16 @@ class LogWriter:
                 if ev is None:
                     done = True
                     continue
+                if self.max_bytes and self.written >= self.max_bytes:
+                    self.dropped += 1
+                    continue
+                rows = ev.log_lines()
+                self.written += sum(len(row) + 1 for row in rows)
                 self.events.append(ev)
-                lines.extend(ev.log_lines())
+                lines.extend(rows)
+            if self.max_bytes and self.written >= self.max_bytes and not self.capped:
+                self.capped = True
+                lines.append("(the log stops here: it reached its %d MB limit)" % (self.max_bytes // (1024 * 1024)))
             if self.handle is not None and lines:
                 try:
                     self.handle.write("\n".join(lines) + "\n")
@@ -753,6 +781,7 @@ class LogWriter:
 
     def close(self, footer, rewrite):
         self.queue.put(None)
+        footer = list(footer)
         if self.thread is not None:
             self.thread.join(timeout=20)
         if self.handle is not None:
@@ -761,6 +790,9 @@ class LogWriter:
             except Exception:
                 pass
             self.handle = None
+        if self.dropped:
+            footer.append("%s left out: the log reached its %d MB limit"
+                          % (plural(self.dropped, "later event"), self.max_bytes // (1024 * 1024)))
         try:
             if rewrite:
                 temp = self.path + ".tmp"
@@ -826,6 +858,120 @@ class Store:
         low = bisect.bisect_right(items, start, key=lambda ev: ev.ts)
         high = bisect.bisect_right(items, end, key=lambda ev: ev.ts)
         return items[low:high]
+
+
+DEFAULT_LOG_MB = 30
+EXCLUSION_PARTS = 4
+DEFAULT_EXCLUSIONS = (
+    "ETW | info | [Kernel-File] | FileName=",
+    "Trace Tools | info",
+    "ProcMon | info",
+)
+EXCLUSION_HELP = (
+    "One rule per line: source | level | the text it holds | the text that keeps it",
+    "An empty part matches anything. The fourth part rescues an event the third one caught.",
+    "Sources: Registry Files Processes Windows Event Log ProcMon Wallpaper ETW WMI Probes Trace Tools",
+    "Levels: info change warn error marker. System events are never left out.",
+)
+
+
+def parse_exclusion(line):
+    line = (line or "").strip()
+    if not line or line[0] in "#;":
+        return None
+    parts = [part.strip().lower() for part in line.split("|")]
+    while len(parts) < EXCLUSION_PARTS:
+        parts.append("")
+    return tuple(parts[:EXCLUSION_PARTS])
+
+
+class Exclusions:
+    def __init__(self, lines=(), log_mb=DEFAULT_LOG_MB, enabled=True):
+        self.log_mb = log_mb
+        self.enabled = enabled
+        self.blocked = 0
+        self.lines = []
+        self.rules = []
+        self.set_lines(lines)
+
+    def set_lines(self, lines):
+        self.lines = [line.strip() for line in lines if line.strip()]
+        self.rules = [rule for rule in (parse_exclusion(line) for line in self.lines) if rule]
+
+    def blocks(self, source, level, text):
+        if not self.enabled or source == SRC_SYSTEM or not self.rules:
+            return False
+        low = (text or "").lower()
+        name = (source or "").lower()
+        mark = (level or "").lower()
+        for want_source, want_level, holds, keeps in self.rules:
+            if want_source and want_source != name:
+                continue
+            if want_level and want_level != mark:
+                continue
+            if holds and holds not in low:
+                continue
+            if keeps and keeps in low:
+                continue
+            self.blocked += 1
+            return True
+        return False
+
+    def log_bytes(self):
+        return max(1, self.log_mb) * 1024 * 1024
+
+
+def load_exclusions(path=EXCLUSIONS_PATH):
+    lines = list(DEFAULT_EXCLUSIONS)
+    log_mb = DEFAULT_LOG_MB
+    enabled = True
+    parser = configparser.ConfigParser(interpolation=None)
+    try:
+        if parser.read(path, encoding="utf-8"):
+            found = [row.strip() for row in parser.get("Exclusions", "rules", fallback="").splitlines()]
+            found = [row for row in found if row]
+            if found:
+                lines = found
+            enabled = parser.getboolean("Exclusions", "enabled", fallback=True)
+            log_mb = parser.getint("Options", "max_log_mb", fallback=DEFAULT_LOG_MB)
+    except (configparser.Error, OSError, ValueError) as exc:
+        LOG.warning("Exclusions could not be read from %s: %s", path, exc)
+    return Exclusions(lines, max(1, min(log_mb, 4096)), enabled)
+
+
+def save_exclusions(rules, path=EXCLUSIONS_PATH):
+    body = []
+    for note in EXCLUSION_HELP:
+        body.append("; " + note)
+    body.append("")
+    body.append("[Exclusions]")
+    body.append("enabled = %s" % ("yes" if rules.enabled else "no"))
+    body.append("rules =")
+    for line in rules.lines:
+        body.append("    " + line)
+    body.append("")
+    body.append("[Options]")
+    body.append("max_log_mb = %d" % rules.log_mb)
+    body.append("")
+    try:
+        temp = path + ".tmp"
+        with open(temp, "w", encoding="utf-8", newline="\n") as fh:
+            fh.write("\n".join(body))
+        os.replace(temp, path)
+        return ""
+    except OSError as exc:
+        LOG.warning("Exclusions could not be written to %s: %s", path, exc)
+        return str(exc)
+
+
+def exclusion_from(ev):
+    text = ev.text or ""
+    match = re.search(r"0x[0-9A-Fa-f]+|\d{3,}", text)
+    body = text[:match.start()] if match else text
+    body = body.rstrip(" =|:,;-\t")
+    if not body:
+        body = text[:60]
+    return "%s | %s | %s" % (ev.source, ev.level, body[:160])
 
 
 def sample_events(events, limit):
@@ -2469,7 +2615,7 @@ class ProcMonSource(Source):
             found = sum(1 for row in rows if start < row[0] <= start + MARKER_WINDOW)
             self.hub.emit(SRC_SYSTEM, KIND_MARK, "Marker %d: ProcMon listed %s in the %d seconds after it" % (
                 number, plural(found, "event"), MARKER_WINDOW), MARK, ts=start + MARKER_WINDOW + 0.001)
-        self.status("idle", "%d listed" % len(rows))
+        self.status("done", "%d listed" % len(rows))
 
 
 def current_wallpaper():
@@ -2848,7 +2994,7 @@ class ProbeSource(Source):
                 probe()
             except Exception as exc:
                 self.emit(KIND_PROBE, "probe %s failed: %s" % (probe.__name__, one_line(exc, 160)), WARN)
-        self.status("idle", "settings read once at start")
+        self.status("done", "settings read once at start")
 
     def _say(self, text, level=INFO, detail=""):
         self.emit(KIND_PROBE, one_line(text, 240), level, detail=detail)
@@ -3178,7 +3324,7 @@ class TraceToolSource(Source):
             return
         self.note("%s listed %d of %s" % (self.mode, listed, plural(total, "row")), INFO,
                   "Capture file: %s" % self.etl)
-        self.status("idle", "%d listed" % listed)
+        self.status("done", "%d listed" % listed)
 
 SOURCE_TYPES = (RegistrySource, FilesSource, ProcessSource, WindowsSource, EtwRawSource, WmiSource, EventLogSource,
                 WallpaperSource, ProbeSource, ProcMonSource, TraceToolSource)
@@ -3194,7 +3340,7 @@ class Session:
         self.finished = threading.Event()
         self.started = time.time()
         self.stamp_text = datetime.fromtimestamp(self.started).strftime("%Y%m%d_%H%M%S")
-        self.log_path = os.path.join(DESKTOP, "Bastard_%s.log" % self.stamp_text)
+        self.log_path = os.path.join(PROGRAM_DIR, "Bastard_%s.log" % self.stamp_text)
         self.pml_path = ""
         self.admin = is_admin()
         self.devices = DeviceMap()
@@ -3224,7 +3370,9 @@ class Session:
         self.starter.start()
 
     def _start(self):
-        self.writer = LogWriter(self.log_path, self.header())
+        rules = self.hub.exclusions
+        self.writer = LogWriter(self.log_path, self.header(),
+                                rules.log_bytes() if rules is not None else 0)
         written = self.writer.start()
         self.hub.writer = self.writer
         self.hub.emit(SRC_SYSTEM, KIND_SYS, "Trace started", INFO, detail="\n".join(self.header()[:5]),
@@ -3330,10 +3478,11 @@ class Theme:
     SCROLL_HOVER = "#7f849c"
 
 
-STATE_COLORS = {"running": Theme.GREEN, "starting": Theme.YELLOW, "finishing": Theme.YELLOW, "warn": Theme.YELLOW,
-                "failed": Theme.RED, "off": Theme.MUTE, "idle": Theme.MUTE}
-STATE_WORDS = {"running": "running", "starting": "starting", "finishing": "finishing", "warn": "limited",
-               "failed": "failed", "off": "off", "idle": "idle"}
+STATE_COLORS = {"running": Theme.GREEN, "done": Theme.GREEN, "starting": Theme.YELLOW,
+                "finishing": Theme.YELLOW, "warn": Theme.YELLOW, "failed": Theme.RED, "off": Theme.MUTE,
+                "idle": Theme.MUTE}
+STATE_WORDS = {"running": "running", "done": "done", "starting": "starting", "finishing": "finishing",
+               "warn": "limited", "failed": "failed", "off": "off", "idle": "idle"}
 LEVEL_COLORS = {INFO: Theme.FG, CHANGE: Theme.YELLOW, WARN: Theme.ORANGE, ERROR: Theme.RED, MARK: Theme.PURPLE}
 SHOW_CHOICES = ("All events", "Changes and problems", "Problems only")
 CHIP_SOURCES = (SRC_REG, SRC_FILES, SRC_PROC, SRC_WIN, SRC_LOG, SRC_PM, SRC_WALL, SRC_SYSTEM)
@@ -3554,7 +3703,10 @@ class App:
         self.root = root
         self.options = options
         self.scale = scale
-        self.hub = Hub()
+        self.rules = load_exclusions()
+        if not os.path.isfile(EXCLUSIONS_PATH):
+            save_exclusions(self.rules)
+        self.hub = Hub(self.rules)
         self.hub.reset(SOURCE_NAMES)
         self.store = Store()
         self.session = None
@@ -3628,14 +3780,10 @@ class App:
         self.btn_marker.pack(side="left", padx=(self.px(10), self.px(2)))
         self.timer = tk.Label(bar, text="", bg=Theme.PANEL, fg=Theme.GREEN, font=self.fonts["mono_bold"])
         self.timer.pack(side="left", padx=self.px(14))
-        self.btn_folder = ttk.Button(bar, text="Open log folder", command=self.open_log_folder)
-        self.btn_folder.pack(side="right", padx=self.px(2))
-        self.btn_json = ttk.Button(bar, text="Export JSON", command=lambda: self.export("json"))
-        self.btn_json.pack(side="right", padx=self.px(2))
-        self.btn_csv = ttk.Button(bar, text="Export CSV", command=lambda: self.export("csv"))
-        self.btn_csv.pack(side="right", padx=self.px(2))
-        self.btn_procmon = ttk.Button(bar, text="Open in ProcMon", command=self.open_procmon)
-        self.btn_procmon.pack(side="right", padx=self.px(2))
+        self.btn_options = ttk.Button(bar, text="Options", command=self.edit_options)
+        self.btn_options.pack(side="right", padx=self.px(2))
+        self.btn_filter = ttk.Button(bar, text="Filter", command=self.edit_filter)
+        self.btn_filter.pack(side="right", padx=self.px(2))
         admin_text = "administrator" if self.admin else ("not administrator" if IS_WIN else "")
         tk.Label(bar, text=admin_text, bg=Theme.PANEL, fg=Theme.GREEN if self.admin else Theme.ORANGE,
                  font=self.fonts["small"]).pack(side="right", padx=self.px(12))
@@ -3736,6 +3884,12 @@ class App:
         for level, color in LEVEL_COLORS.items():
             self.tree.tag_configure(level, foreground=color)
         self.tree.tag_configure(MARK, foreground=Theme.PURPLE, font=self.fonts["mono_bold"])
+        self.menu = tk.Menu(self.tree, tearoff=0, bg=Theme.PANEL, fg=Theme.FG,
+                            activebackground=Theme.ACCENT, activeforeground=Theme.PANEL, bd=0)
+        self.menu.add_command(label="Leave this match out", command=self.exclude_selected)
+        self.menu.add_command(label="Copy", command=self.copy_selection)
+        self.menu_row = ""
+        self.tree.bind("<Button-3>", self._popup)
         self.tree.bind("<<TreeviewSelect>>", self._selected)
         self.tree.bind("<Control-c>", self.copy_selection)
         self.tree.bind("<Control-C>", self.copy_selection)
@@ -3801,6 +3955,8 @@ class App:
     def _match(self, ev):
         if ev.kind == KIND_MARK:
             return True
+        if self.rules is not None and self.rules.blocks(ev.source, ev.level, ev.text):
+            return False
         chip = self.source_chips.get(ev.source)
         if chip is not None and not chip.on:
             return False
@@ -3918,15 +4074,31 @@ class App:
             self._tk_error(*sys.exc_info())
         self.root.after(500, self._refresh)
 
+    def _busy_note(self):
+        session = self.session
+        if session is None or session.finished.is_set() or not session.stop_event.is_set():
+            return ""
+        status, _counts = self.hub.snapshot()
+        busy = sorted(name for name, value in status.items()
+                      if value[0] in ("running", "starting", "finishing"))
+        if not busy:
+            return "finishing"
+        return "finishing: %s still reading what it captured" % ", ".join(busy)
+
     def _status_text(self):
+        busy = self._busy_note()
         total = len(self.store.items)
         if not total:
-            return "Ready" if self.session is None else "Waiting for events"
+            return busy or ("Ready" if self.session is None else "Waiting for events")
         text = "%s, %d match the filters" % (plural(total, "event"), self.match_count)
+        if busy:
+            text = busy + ", " + text
         if self.match_count > self.view_count:
             text += ", the newest %d are listed" % self.view_count
         if self.store.dropped:
             text += ", %d more are only in the log" % self.store.dropped
+        if self.rules is not None and self.rules.blocked:
+            text += ", %d left out by the filter" % self.rules.blocked
         return text
 
     def _check_session(self):
@@ -3950,8 +4122,6 @@ class App:
         self.btn_stop.configure(state="normal" if running and not self.closing else "disabled")
         self.btn_marker.configure(state="normal" if running and not self.closing else "disabled")
         session = self.session
-        ready = state == "done" and session is not None and session.pml_path and os.path.isfile(session.pml_path)
-        self.btn_procmon.configure(state="normal" if ready else "disabled")
         if state == "done" and session is not None:
             self.timer.configure(text=duration_clock((session.stopped_at or time.time()) - session.started),
                                  fg=Theme.DIM)
@@ -4081,28 +4251,126 @@ class App:
         except Exception as exc:
             messagebox.showerror("Bastard", "The file could not be saved:\n%s" % exc, parent=self.root)
 
-    def open_log_folder(self):
-        session = self.session
+    def _popup(self, event):
+        row = self.tree.identify_row(event.y)
+        if not row:
+            return
+        if row not in self.tree.selection():
+            self.tree.selection_set(row)
+        self.menu_row = row
         try:
-            if IS_WIN and session is not None and os.path.isfile(session.log_path):
-                subprocess.Popen('explorer /select,"%s"' % session.log_path)
-            elif IS_WIN:
-                os.startfile(DESKTOP)
-        except Exception as exc:
-            messagebox.showerror("Bastard", "The folder could not be opened:\n%s" % exc, parent=self.root)
+            self.menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            self.menu.grab_release()
 
-    def open_procmon(self):
-        session = self.session
-        if session is None or not session.pml_path or not os.path.isfile(session.pml_path):
+    def exclude_selected(self):
+        ev = self.store.by_seq.get(int(self.menu_row)) if self.menu_row.isdigit() else None
+        if ev is None:
             return
-        exe = find_procmon()
-        if not exe:
-            messagebox.showwarning("Bastard", "Procmon64.exe was not found.", parent=self.root)
+        if ev.source == SRC_SYSTEM:
+            self.flash("System events are never left out")
             return
+        line = exclusion_from(ev)
+        if line in self.rules.lines:
+            self.flash("That rule is already in the filter")
+            return
+        self.rules.set_lines(list(self.rules.lines) + [line])
+        self.rules.enabled = True
+        error = save_exclusions(self.rules)
+        self._schedule_rebuild(1)
+        if error:
+            self.flash("The rules could not be saved: " + one_line(error, 120))
+        else:
+            self.flash("Left out from now on: " + one_line(line, 150))
+
+    def _dialog(self, title):
+        window = tk.Toplevel(self.root)
+        window.title("Bastard - " + title)
+        window.configure(bg=Theme.PANEL)
+        window.transient(self.root)
         try:
-            os.startfile(exe, arguments='/OpenLog "%s"' % session.pml_path)
-        except Exception as exc:
-            messagebox.showerror("Bastard", "ProcMon could not be opened:\n%s" % exc, parent=self.root)
+            window.geometry("+%d+%d" % (self.root.winfo_rootx() + self.px(70),
+                                        self.root.winfo_rooty() + self.px(70)))
+        except tk.TclError:
+            pass
+        return window
+
+    def _dialog_note(self, window, text, color):
+        tk.Label(window, text=text, bg=Theme.PANEL, fg=color, font=self.fonts["small"], anchor="w",
+                 justify="left", wraplength=self.px(560)).pack(fill="x", padx=self.px(12))
+
+    def edit_filter(self):
+        window = self._dialog("Filter")
+        self._dialog_note(window, "Events a rule catches stay out of the timeline and out of the log.", Theme.FG)
+        for note in EXCLUSION_HELP:
+            self._dialog_note(window, note, Theme.DIM)
+        box = tk.Text(window, bg=Theme.BG, fg=Theme.FG, insertbackground=Theme.FG, font=self.fonts["mono"],
+                      height=14, width=94, bd=0, highlightthickness=1, highlightbackground=Theme.PANEL2)
+        box.pack(fill="both", expand=True, padx=self.px(12), pady=self.px(8))
+        box.insert("1.0", "\n".join(self.rules.lines))
+        state = tk.BooleanVar(value=self.rules.enabled)
+        tk.Checkbutton(window, text="Use these rules", variable=state, bg=Theme.PANEL, fg=Theme.FG,
+                       selectcolor=Theme.BG, activebackground=Theme.PANEL, activeforeground=Theme.FG,
+                       font=self.fonts["small"]).pack(anchor="w", padx=self.px(10))
+        self._dialog_note(window, "Saved in " + EXCLUSIONS_PATH, Theme.DIM)
+        row = tk.Frame(window, bg=Theme.PANEL)
+        row.pack(fill="x", padx=self.px(12), pady=self.px(10))
+
+        def keep():
+            self.rules.set_lines(box.get("1.0", "end").splitlines())
+            self.rules.enabled = bool(state.get())
+            error = save_exclusions(self.rules)
+            window.destroy()
+            self._schedule_rebuild(1)
+            if error:
+                self.flash("The rules could not be saved: " + one_line(error, 120))
+            else:
+                self.flash("%s saved" % plural(len(self.rules.lines), "rule"))
+
+        def defaults():
+            box.delete("1.0", "end")
+            box.insert("1.0", "\n".join(DEFAULT_EXCLUSIONS))
+
+        ttk.Button(row, text="Save", style="Accent.TButton", command=keep).pack(side="right", padx=self.px(2))
+        ttk.Button(row, text="Cancel", command=window.destroy).pack(side="right", padx=self.px(2))
+        ttk.Button(row, text="Back to the defaults", command=defaults).pack(side="left")
+        box.focus_set()
+
+    def edit_options(self):
+        window = self._dialog("Options")
+        self._dialog_note(window, "How large the trace log on disk may grow.", Theme.FG)
+        self._dialog_note(window, "The trace stops writing to the log once it reaches this, and says so in "
+                                  "the log and in the footer. The timeline keeps going.", Theme.DIM)
+        row = tk.Frame(window, bg=Theme.PANEL)
+        row.pack(fill="x", padx=self.px(12), pady=self.px(10))
+        tk.Label(row, text="Log limit", bg=Theme.PANEL, fg=Theme.FG,
+                 font=self.fonts["ui"]).pack(side="left", padx=(0, self.px(8)))
+        value = tk.StringVar(value=str(self.rules.log_mb))
+        entry = ttk.Entry(row, textvariable=value, width=8, font=self.fonts["mono"])
+        entry.pack(side="left")
+        tk.Label(row, text="MB", bg=Theme.PANEL, fg=Theme.DIM,
+                 font=self.fonts["ui"]).pack(side="left", padx=self.px(6))
+        self._dialog_note(window, "Saved in " + EXCLUSIONS_PATH, Theme.DIM)
+        buttons = tk.Frame(window, bg=Theme.PANEL)
+        buttons.pack(fill="x", padx=self.px(12), pady=self.px(10))
+
+        def keep():
+            try:
+                size = int(value.get().strip())
+            except ValueError:
+                self.flash("The log limit has to be a whole number of megabytes")
+                return
+            self.rules.log_mb = max(1, min(size, 4096))
+            error = save_exclusions(self.rules)
+            window.destroy()
+            if error:
+                self.flash("The limit could not be saved: " + one_line(error, 120))
+            else:
+                self.flash("The log limit is %d MB from the next trace on" % self.rules.log_mb)
+
+        ttk.Button(buttons, text="Save", style="Accent.TButton", command=keep).pack(side="right", padx=self.px(2))
+        ttk.Button(buttons, text="Cancel", command=window.destroy).pack(side="right", padx=self.px(2))
+        entry.focus_set()
 
     def _save_settings(self):
         data = dict(self.settings)

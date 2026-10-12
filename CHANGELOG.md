@@ -1,5 +1,21 @@
 # Changelog
 
+## 1.3.0
+
+- Bastard 1.3.0 leaves the repetitive noise out, keeps its files next to itself, and says what it is doing after Stop.
+- A filter list decides what never reaches the timeline or the log, and it starts with the three streams that said least.
+- ETW file events that carry only handles are left out, and the ones that name a file are kept.
+- The reads ProcMon and Trace Tools list are left out, while every denial and every write they see is kept.
+- Right click an event and Leave this match out writes a rule for events shaped like that one.
+- The Filter button shows the whole list to read and to edit, and Back to the defaults restores it.
+- The rules live in Exclusions.ini next to Bastard, so they last and can be edited without the program.
+- The trace log is written next to Bastard now, instead of on the Desktop.
+- The Options button sets how large the trace log may grow, 30 MB to begin with, and the log says where it stopped.
+- The log holds everything the filter let through rather than every event, so the filter decides its size as well.
+- ProcMon, Probes and Trace Tools turn green when they finish, instead of going grey as if they had never run.
+- While a trace is finishing, the status line names the sources still reading what they captured.
+- Open in ProcMon, Export CSV, Export JSON and Open log folder are gone from the bar, and Ctrl+S and Ctrl+J still export.
+
 ## 1.2.3
 
 - Bastard 1.2.3 reads four more personalization policies and reports where the Desktop and AppData folders really are.

@@ -289,6 +289,79 @@ class Timeline(unittest.TestCase):
         self.assertLessEqual(len(picked), 30)
         self.assertEqual([ev.key() for ev in picked], sorted(ev.key() for ev in picked))
 
+    def test_exclusion_rules(self):
+        rules = b.Exclusions(["ETW | info | [Kernel-File] | FileName=", "Trace Tools | info", "ProcMon | info"])
+        self.assertTrue(rules.blocks("ETW", b.INFO, "[Kernel-File] Irp=0xFF | Status=0x0"))
+        self.assertFalse(rules.blocks("ETW", b.INFO, "[Kernel-File] FileKey=0xFF | FileName=C:\\x.jpg"))
+        self.assertFalse(rules.blocks("ETW", b.CHANGE, "[Kernel-File] Irp=0xFF | Status=0x0"))
+        self.assertTrue(rules.blocks("ProcMon", b.INFO, "read QueryOpen C:\\x.dll"))
+        self.assertFalse(rules.blocks("ProcMon", b.ERROR, "denied CreateFile C:\\x"))
+        self.assertFalse(rules.blocks(b.SRC_SYSTEM, b.INFO, "Trace stopped after 32.0 s"))
+        self.assertEqual(rules.blocked, 2)
+        rules.enabled = False
+        self.assertFalse(rules.blocks("ProcMon", b.INFO, "read QueryOpen C:\\x.dll"))
+
+    def test_default_exclusions_keep_what_the_selftest_looks_for(self):
+        rules = b.Exclusions(b.DEFAULT_EXCLUSIONS)
+        wanted = [
+            (b.SRC_SYSTEM, b.INFO, "Trace stopped after 32.0 s"),
+            (b.SRC_SYSTEM, b.MARK, "Marker 1: 4 events in the 6 seconds after it"),
+            (b.SRC_FILES, b.CHANGE, "File created: x.txt"),
+            (b.SRC_FILES, b.CHANGE, "renamed x.txt to y.txt"),
+            (b.SRC_FILES, b.CHANGE, "deleted y.txt"),
+            (b.SRC_PROC, b.INFO, "Started python.exe (PID 7) by Bastard.exe (PID 1)"),
+            (b.SRC_PROC, b.INFO, "Exited cmd.exe (PID 9) with exit code 7 after 0.0 s"),
+            (b.SRC_REG, b.CHANGE, "HKCU\\Software\\BastardSelfTest [A] 1 (0x1) -> 2 (0x2)"),
+            (b.SRC_REG, b.CHANGE, "HKCU\\Software\\BastardSelfTest [B] added"),
+            (b.SRC_LOG, b.WARN, "Application: Bastard self test event"),
+            (b.SRC_WALL, b.INFO, "Wallpaper at start: C:\\x.jpg"),
+            (b.SRC_PM, b.CHANGE, "registry RegSetValue HKCU\\Software\\BastardSelfTest [A]"),
+            (b.SRC_WIN, b.INFO, "Window opened: Untitled - Notepad"),
+        ]
+        for source, level, text in wanted:
+            self.assertFalse(rules.blocks(source, level, text), text)
+        self.assertEqual(rules.blocked, 0)
+
+    def test_exclusion_from_event(self):
+        ev = event(1.0, b.SRC_ETW, b.KIND_FILE, b.INFO,
+                   "[Kernel-File] Irp=0xFFFFCA02F50EB3D8 | ExtraInformation=0x18 | Status=0x0")
+        self.assertEqual(b.exclusion_from(ev), "ETW | info | [Kernel-File] Irp")
+        rules = b.Exclusions([b.exclusion_from(ev)])
+        self.assertTrue(rules.blocks(ev.source, ev.level, ev.text))
+
+    def test_exclusions_round_trip(self):
+        folder = tempfile.mkdtemp(prefix="bastard_rules_")
+        try:
+            path = os.path.join(folder, "Exclusions.ini")
+            rules = b.Exclusions(["ETW | info | [Kernel-File] | FileName=", "Files | change | tick.txt"], 7, False)
+            self.assertEqual(b.save_exclusions(rules, path), "")
+            back = b.load_exclusions(path)
+            self.assertEqual(back.lines, rules.lines)
+            self.assertEqual(back.log_mb, 7)
+            self.assertFalse(back.enabled)
+            self.assertEqual(b.load_exclusions(os.path.join(folder, "missing.ini")).lines,
+                             list(b.DEFAULT_EXCLUSIONS))
+        finally:
+            shutil.rmtree(folder, ignore_errors=True)
+
+    def test_log_writer_stops_at_its_limit(self):
+        folder = tempfile.mkdtemp(prefix="bastard_log_")
+        try:
+            path = os.path.join(folder, "trace.log")
+            writer = b.LogWriter(path, ["header"], 400)
+            writer.start()
+            for index in range(400):
+                writer.put(event(float(index), b.SRC_FILES, b.KIND_FILE, b.CHANGE, "line %d" % index))
+            writer.close(["footer"], True)
+            self.assertTrue(writer.dropped > 0)
+            self.assertTrue(writer.capped)
+            with open(path, "r", encoding="utf-8") as fh:
+                body = fh.read()
+            self.assertIn("reached its", body)
+            self.assertTrue(len(body) < 4000)
+        finally:
+            shutil.rmtree(folder, ignore_errors=True)
+
     def test_marker_summary(self):
         text, level, _ = b.marker_summary(2, 100.0, [event(99.0), event(107.0)])
         self.assertEqual(level, b.WARN)
