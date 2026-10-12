@@ -25,7 +25,7 @@ import tkinter as tk
 import tkinter.font as tkfont
 from tkinter import filedialog, messagebox, ttk
 
-VERSION = "1.5.1"
+VERSION = "1.5.2"
 
 APP_NAME = "Bastard"
 IS_WIN = os.name == "nt"
@@ -676,8 +676,13 @@ class Hub:
         self.status = {}
         self.counts = {}
         self.bad_times = set()
+        self.closed = False
+        self.late = 0
 
     def emit(self, source, kind, text, level=INFO, pid=None, proc="", detail="", ts=None):
+        if self.closed and source != SRC_SYSTEM:
+            self.late += 1
+            return None
         text = clean_text(text)
         proc = clean_text(proc)
         detail = clean_text(detail)
@@ -714,6 +719,8 @@ class Hub:
     def reset(self, sources):
         with self.lock:
             self.counts = {}
+            self.closed = False
+            self.late = 0
             for source in sources:
                 self.status[source] = ("idle", "")
 
@@ -871,6 +878,7 @@ DEFAULT_EXCLUSIONS = (
     "ProcMon | info | RegQueryValue HKCU\\SOFTWARE\\Microsoft\\Windows\\DWM\\ColorPrevalence",
     "| | DisallowRun",
     "| | Certificates",
+    "ETW | | Kernel-File",
 )
 EXCLUSION_HELP = (
     "One rule per line: source | level | the text it holds | the text that keeps it",
@@ -3540,6 +3548,7 @@ class Session:
         except Exception:
             record_internal_error(traceback.format_exc())
         finally:
+            self.hub.closed = True
             self.hub.writer = None
             self.running = False
             self.finished.set()
@@ -4227,6 +4236,8 @@ class App:
             text += ", %d more are only in the log" % self.store.dropped
         if self.rules is not None and self.rules.blocked:
             text += ", %d left out by the filter" % self.rules.blocked
+        if self.hub.late:
+            text += ", %d arrived after the trace had ended" % self.hub.late
         return text
 
     def _check_session(self):

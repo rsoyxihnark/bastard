@@ -3,6 +3,7 @@ import importlib.util
 import io
 import json
 import os
+import queue
 import shutil
 import tempfile
 import time
@@ -356,16 +357,24 @@ class Timeline(unittest.TestCase):
         self.assertFalse(rules.blocks(b.SRC_TRACE, b.INFO, "logman: EventName=FileIo | Type=Read | PID=4"))
         self.assertTrue(hasattr(b.TraceToolSource, "_leave_it_to_etw"))
 
-    def test_the_defaults_are_the_three_the_owner_asked_for(self):
+    def test_the_defaults_are_the_four_the_owner_asked_for(self):
         rules = b.Exclusions(b.DEFAULT_EXCLUSIONS)
-        self.assertEqual(len(rules.rules), 3)
+        self.assertEqual(len(rules.rules), 4)
         self.assertTrue(rules.blocks(b.SRC_PM, b.INFO,
                                      "read RegQueryValue HKCU\\SOFTWARE\\Microsoft\\Windows\\DWM"
                                      "\\ColorPrevalence"))
         self.assertTrue(rules.blocks(b.SRC_PROBE, b.INFO, "D: DisallowRun policy"))
         self.assertTrue(rules.blocks(b.SRC_REG, b.CHANGE, "HKLM\\...\\Certificates\\Root added"))
         self.assertFalse(rules.blocks(b.SRC_PM, b.INFO, "read QueryOpen C:\\x.dll"))
-        self.assertFalse(rules.blocks(b.SRC_ETW, b.INFO, "[Kernel-File] Irp=0xFF | Status=0x0"))
+
+    def test_the_defaults_leave_every_kernel_file_line_out(self):
+        rules = b.Exclusions(b.DEFAULT_EXCLUSIONS)
+        for level in (b.INFO, b.CHANGE, b.WARN, b.ERROR):
+            self.assertTrue(rules.blocks(b.SRC_ETW, level, "[Kernel-File] Irp=0xFF | Status=0x0"), level)
+        self.assertTrue(rules.blocks(b.SRC_ETW, b.INFO, "x", "", "Provider: Kernel-File\nFileName=C:\\a.jpg"))
+        self.assertFalse(rules.blocks(b.SRC_ETW, b.INFO, "[Kernel-Registry] RegSetValue HKCU\\Software"))
+        self.assertFalse(rules.blocks(b.SRC_ETW, b.INFO, "[Shell-Core] wallpaper changed"))
+        self.assertFalse(rules.blocks(b.SRC_PM, b.CHANGE, "file WriteFile C:\\TranscodedWallpaper"))
 
     def test_sort_keys_cover_every_column(self):
         self.assertEqual(tuple(sorted(b.SORT_KEYS)), tuple(sorted(b.TREE_COLUMNS)))
@@ -535,6 +544,39 @@ class Timeline(unittest.TestCase):
         self.assertIsNotNone(hub.emit("ETW", "File", "[Kernel-File] Pad=1", detail="FileName=Wallpaper"))
         self.assertEqual(hub.exclusions.blocked, 1)
 
+    def test_the_hub_stops_taking_events_once_the_trace_has_ended(self):
+        hub = b.Hub()
+        hub.reset([b.SRC_ETW, b.SRC_PM])
+        self.assertIsNotNone(hub.emit(b.SRC_ETW, "ETW", "[Kernel-File] during the trace"))
+        hub.closed = True
+        self.assertIsNone(hub.emit(b.SRC_ETW, "ETW", "[Kernel-File] a leaked thread"))
+        self.assertIsNone(hub.emit(b.SRC_PM, "Registry", "RegQueryValue HKCU"))
+        self.assertEqual(hub.late, 2)
+        self.assertIsNotNone(hub.emit(b.SRC_SYSTEM, b.KIND_MARK, "Marker 1"))
+        _status, counts = hub.snapshot()
+        self.assertEqual(counts.get(b.SRC_ETW), 1)
+        self.assertIsNone(counts.get(b.SRC_PM))
+        hub.reset([b.SRC_ETW, b.SRC_PM])
+        self.assertFalse(hub.closed)
+        self.assertEqual(hub.late, 0)
+        self.assertIsNotNone(hub.emit(b.SRC_ETW, "ETW", "a new trace"))
+
+    def test_nothing_reaches_the_ui_queue_after_the_trace_has_ended(self):
+        hub = b.Hub()
+        hub.reset([b.SRC_ETW])
+        hub.emit(b.SRC_ETW, "ETW", "one")
+        hub.closed = True
+        for index in range(50):
+            hub.emit(b.SRC_ETW, "ETW", "leak %d" % index)
+        seen = []
+        while True:
+            try:
+                seen.append(hub.ui.get_nowait())
+            except queue.Empty:
+                break
+        self.assertEqual([ev.text for ev in seen], ["one"])
+        self.assertEqual(hub.late, 50)
+
     def test_marker_summary(self):
         text, level, _ = b.marker_summary(2, 100.0, [event(99.0), event(107.0)])
         self.assertEqual(level, b.WARN)
@@ -615,6 +657,51 @@ class Window(unittest.TestCase):
     def tearDown(self):
         b.SETTINGS_PATH, b.DATA_DIR = self.saved
         shutil.rmtree(self.home, ignore_errors=True)
+
+    def test_a_rebuild_keeps_the_place_the_list_was_scrolled_to(self):
+        scale = b.setup_style(self.root)
+        app = b.App(self.root, b.parse_options([]), scale)
+        self.root.deiconify()
+        self.root.geometry("1200x700")
+        now = time.time()
+        for index in range(600):
+            app.hub.emit(b.SRC_REG, b.KIND_REG, "HKCU\\Software\\Thing%d" % index, b.CHANGE, ts=now + index)
+        app._drain()
+        if app.rebuild_job is not None:
+            app.root.after_cancel(app.rebuild_job)
+            app.rebuild_job = None
+        app._rebuild()
+        self.root.update()
+        app.tree.selection_remove(*app.tree.selection())
+        app.tree.yview_moveto(0.4)
+        self.root.update()
+        before = app.tree.yview()[0]
+        self.assertGreater(before, 0.2)
+        self.assertLess(before, 0.8)
+        app._rebuild()
+        self.root.update()
+        self.assertEqual(len(app.tree.get_children()), 600)
+        self.assertAlmostEqual(app.tree.yview()[0], before, places=2)
+
+    def test_a_rebuild_still_follows_the_newest_when_at_the_bottom(self):
+        scale = b.setup_style(self.root)
+        app = b.App(self.root, b.parse_options([]), scale)
+        self.root.deiconify()
+        self.root.geometry("1200x700")
+        now = time.time()
+        for index in range(600):
+            app.hub.emit(b.SRC_REG, b.KIND_REG, "HKCU\\Software\\Thing%d" % index, b.CHANGE, ts=now + index)
+        app._drain()
+        if app.rebuild_job is not None:
+            app.root.after_cancel(app.rebuild_job)
+            app.rebuild_job = None
+        app._rebuild()
+        app.tree.selection_remove(*app.tree.selection())
+        app.tree.yview_moveto(1.0)
+        self.root.update()
+        app._rebuild()
+        self.root.update()
+        self.assertGreaterEqual(app.tree.yview()[1], 0.999)
 
     def test_filters_search_and_selection(self):
         scale = b.setup_style(self.root)

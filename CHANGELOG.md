@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.5.2
+
+- Bastard 1.5.2 stops the event list moving on its own once a trace has ended, and leaves the Kernel-File events out.
+- Fixed the event list shuffling its rows around for as long as the window stayed open after a trace had ended.
+- A source that has not let go when a trace ends can no longer add to the list, and the status line says how many it tried.
+- The filter now starts with every ETW Kernel-File event left out, which is the loudest thing a trace records.
+
 ## 1.5.1
 
 - Bastard 1.5.1 leaves out an event when the filter word sits in its detail lines instead of in the line itself.
