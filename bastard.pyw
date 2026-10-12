@@ -25,7 +25,7 @@ import tkinter as tk
 import tkinter.font as tkfont
 from tkinter import filedialog, messagebox, ttk
 
-VERSION = "1.3.0"
+VERSION = "1.3.1"
 
 APP_NAME = "Bastard"
 IS_WIN = os.name == "nt"
@@ -864,7 +864,6 @@ DEFAULT_LOG_MB = 30
 EXCLUSION_PARTS = 4
 DEFAULT_EXCLUSIONS = (
     "ETW | info | [Kernel-File] | FileName=",
-    "Trace Tools | info",
     "ProcMon | info",
 )
 EXCLUSION_HELP = (
@@ -872,6 +871,7 @@ EXCLUSION_HELP = (
     "An empty part matches anything. The fourth part rescues an event the third one caught.",
     "Sources: Registry Files Processes Windows Event Log ProcMon Wallpaper ETW WMI Probes Trace Tools",
     "Levels: info change warn error marker. System events are never left out.",
+    "Delete every line to leave nothing out. An empty list stays empty.",
 )
 
 
@@ -928,10 +928,9 @@ def load_exclusions(path=EXCLUSIONS_PATH):
     parser = configparser.ConfigParser(interpolation=None)
     try:
         if parser.read(path, encoding="utf-8"):
-            found = [row.strip() for row in parser.get("Exclusions", "rules", fallback="").splitlines()]
-            found = [row for row in found if row]
-            if found:
-                lines = found
+            if parser.has_section("Exclusions"):
+                found = [row.strip() for row in parser.get("Exclusions", "rules", fallback="").splitlines()]
+                lines = [row for row in found if row]
             enabled = parser.getboolean("Exclusions", "enabled", fallback=True)
             log_mb = parser.getint("Options", "max_log_mb", fallback=DEFAULT_LOG_MB)
     except (configparser.Error, OSError, ValueError) as exc:
@@ -3237,7 +3236,25 @@ class TraceToolSource(Source):
         self.status("starting", "launching")
         self.spawn(self._run, "capture")
 
+    def _etw_is_reading(self):
+        status, _counts = self.hub.snapshot()
+        return (status.get(SRC_ETW) or ("", ""))[0] in ("starting", "running")
+
+    def _leave_it_to_etw(self):
+        for index in range(8):
+            if not self._etw_is_reading():
+                return False
+            if index < 7 and self.wait(0.5):
+                return True
+        self.status("off", "the ETW source is reading the same providers")
+        self.note("logman and WPR stayed off: the ETW source is reading the same providers live", INFO,
+                  detail="A capture here would be decoded with tracerpt after Stop and repeat what ETW "
+                         "already reported. They start when the ETW source cannot run.")
+        return True
+
     def _run(self):
+        if self._leave_it_to_etw():
+            return
         os.makedirs(TRACE_DIR, exist_ok=True)
         if self._start_logman() or self._start_wpr():
             self.started_ok = True

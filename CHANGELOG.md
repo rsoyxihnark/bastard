@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.3.1
+
+- Bastard 1.3.1 keeps an empty filter empty, and lets logman and WPR sleep while the ETW source is reading.
+- Deleting every rule in the filter now lasts: the list no longer fills itself with the defaults at the next start.
+- logman and WPR only capture when the ETW source cannot read, since they record the same providers it does.
+- A trace with the ETW source live no longer decodes a second capture with tracerpt, which was most of the wait after Stop.
+- The filter no longer leaves out what logman and WPR read, so when they are the only trace, all of it shows.
+
 ## 1.3.0
 
 - Bastard 1.3.0 leaves the repetitive noise out, keeps its files next to itself, and says what it is doing after Stop.

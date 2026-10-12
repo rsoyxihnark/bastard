@@ -322,6 +322,29 @@ class Timeline(unittest.TestCase):
             self.assertFalse(rules.blocks(source, level, text), text)
         self.assertEqual(rules.blocked, 0)
 
+    def test_an_empty_filter_stays_empty(self):
+        folder = tempfile.mkdtemp(prefix="bastard_empty_")
+        try:
+            path = os.path.join(folder, "Exclusions.ini")
+            rules = b.load_exclusions(path)
+            self.assertEqual(rules.lines, list(b.DEFAULT_EXCLUSIONS))
+            rules.set_lines([])
+            self.assertEqual(b.save_exclusions(rules, path), "")
+            back = b.load_exclusions(path)
+            self.assertEqual(back.lines, [])
+            self.assertFalse(back.blocks("ProcMon", b.INFO, "read QueryOpen C:\\x.dll"))
+            kept = b.load_exclusions(path)
+            kept.set_lines([line for line in b.DEFAULT_EXCLUSIONS if not line.startswith("ProcMon")])
+            b.save_exclusions(kept, path)
+            self.assertEqual(len(b.load_exclusions(path).lines), len(b.DEFAULT_EXCLUSIONS) - 1)
+        finally:
+            shutil.rmtree(folder, ignore_errors=True)
+
+    def test_the_defaults_leave_the_trace_tools_fallback_alone(self):
+        rules = b.Exclusions(b.DEFAULT_EXCLUSIONS)
+        self.assertFalse(rules.blocks(b.SRC_TRACE, b.INFO, "logman: EventName=FileIo | Type=Read | PID=4"))
+        self.assertTrue(hasattr(b.TraceToolSource, "_leave_it_to_etw"))
+
     def test_exclusion_from_event(self):
         ev = event(1.0, b.SRC_ETW, b.KIND_FILE, b.INFO,
                    "[Kernel-File] Irp=0xFFFFCA02F50EB3D8 | ExtraInformation=0x18 | Status=0x0")
