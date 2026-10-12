@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.4.1
+
+- Bastard 1.4.1 keeps the trace log under the limit it was given, and lets the ProcMon row count be set.
+- Fixed the trace log growing past its limit, because the limit counted letters while the log is written in bytes.
+- The log limit now leaves room for the lines written at the end, so a 30 MB limit gives a file under 30 MB.
+- Options now carries how many ProcMon rows one trace may list, which is what decides how long the finish takes.
+- ProcMon is now asked to stop the way it is meant to be, instead of the trace waiting up to 45 seconds for it.
+- Reading the capture stops once the ProcMon row count is reached, rather than reading every row and listing none.
+- While ProcMon is closing, the panel counts down the seconds the trace is still waiting for it.
+
 ## 1.4.0
 
 - Bastard 1.4.0 sorts the timeline by any column, and starts the filter with three rules instead of the old ones.

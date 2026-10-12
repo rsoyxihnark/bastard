@@ -393,11 +393,13 @@ class Timeline(unittest.TestCase):
         folder = tempfile.mkdtemp(prefix="bastard_rules_")
         try:
             path = os.path.join(folder, "Exclusions.ini")
-            rules = b.Exclusions(["ETW | info | [Kernel-File] | FileName=", "Files | change | tick.txt"], 7, False)
+            rules = b.Exclusions(["ETW | info | [Kernel-File] | FileName=", "Files | change | tick.txt"], 7, False,
+                                 40000)
             self.assertEqual(b.save_exclusions(rules, path), "")
             back = b.load_exclusions(path)
             self.assertEqual(back.lines, rules.lines)
             self.assertEqual(back.log_mb, 7)
+            self.assertEqual(back.procmon_rows, 40000)
             self.assertFalse(back.enabled)
             self.assertEqual(b.load_exclusions(os.path.join(folder, "missing.ini")).lines,
                              list(b.DEFAULT_EXCLUSIONS))
@@ -421,6 +423,53 @@ class Timeline(unittest.TestCase):
             self.assertTrue(len(body) < 4000)
         finally:
             shutil.rmtree(folder, ignore_errors=True)
+
+    def test_the_finished_log_is_under_the_limit_it_was_given(self):
+        folder = tempfile.mkdtemp(prefix="bastard_cap_")
+        try:
+            path = os.path.join(folder, "trace.log")
+            limit = 2 * 1024 * 1024
+            writer = b.LogWriter(path, ["header"], limit)
+            self.assertTrue(writer.start())
+            text = "C:\\Users\\" + "\u015fehir\u00e7i\u011fi" * 12
+            for index in range(20000):
+                writer.put(event(float(index), b.SRC_FILES, b.KIND_FILE, b.CHANGE, text))
+            writer.close(["footer line %d" % index for index in range(60)], True)
+            self.assertTrue(writer.dropped > 0)
+            self.assertTrue(writer.capped)
+            self.assertLess(os.path.getsize(path), limit)
+            self.assertGreater(os.path.getsize(path), limit // 2)
+        finally:
+            shutil.rmtree(folder, ignore_errors=True)
+
+    def test_log_bytes_counts_what_the_file_holds(self):
+        text = "\u015fehir\u00e7i"
+        self.assertEqual(b.log_bytes(text), len(text.encode("utf-8")))
+        self.assertGreater(b.log_bytes(text), len(text))
+        self.assertEqual(b.log_bytes("plain"), 5)
+
+    def test_the_procmon_row_count_has_bounds_and_a_default(self):
+        folder = tempfile.mkdtemp(prefix="bastard_rows_")
+        try:
+            path = os.path.join(folder, "Exclusions.ini")
+            self.assertEqual(b.load_exclusions(path).procmon_rows, b.PROCMON_ROW_LIMIT)
+            self.assertEqual(b.Exclusions().procmon_rows, b.PROCMON_ROW_LIMIT)
+            for asked, kept in ((1, 1000), (0, 1000), (50000, 50000), (b.PROCMON_ROW_LIMIT * 4, b.PROCMON_ROW_LIMIT)):
+                b.save_exclusions(b.Exclusions([], b.DEFAULT_LOG_MB, True, asked), path)
+                self.assertEqual(b.load_exclusions(path).procmon_rows, kept)
+        finally:
+            shutil.rmtree(folder, ignore_errors=True)
+
+    def test_the_digest_lists_only_as_many_rows_as_it_was_allowed(self):
+        digest = b.ProcmonDigest(999, 25)
+        for index in range(400):
+            digest.add("12:00:00.0000000", "explorer.exe", "4000", "RegQueryValue",
+                       "HKCU\\Software\\Thing%d" % index, "SUCCESS")
+        self.assertEqual(len(digest.rows), 25)
+        self.assertEqual(digest.over, 375)
+        self.assertEqual(digest.total, 400)
+        self.assertTrue(digest.full())
+        self.assertFalse(b.ProcmonDigest(999, 25).full())
 
     def test_marker_summary(self):
         text, level, _ = b.marker_summary(2, 100.0, [event(99.0), event(107.0)])

@@ -25,7 +25,7 @@ import tkinter as tk
 import tkinter.font as tkfont
 from tkinter import filedialog, messagebox, ttk
 
-VERSION = "1.4.0"
+VERSION = "1.4.1"
 
 APP_NAME = "Bastard"
 IS_WIN = os.name == "nt"
@@ -721,6 +721,7 @@ class Hub:
 class LogWriter:
     def __init__(self, path, header, max_bytes=0):
         self.path = path
+        self.room = max(1, max_bytes - LOG_FOOTER_ROOM) if max_bytes else 0
         self.header = list(header)
         self.queue = queue.SimpleQueue()
         self.events = []
@@ -736,8 +737,10 @@ class LogWriter:
         try:
             os.makedirs(os.path.dirname(self.path), exist_ok=True)
             self.handle = open(self.path, "w", encoding="utf-8", errors="replace")
-            self.handle.write("\n".join(self.header) + "\n\n")
+            head = "\n".join(self.header) + "\n\n"
+            self.handle.write(head)
             self.handle.flush()
+            self.written = log_bytes(head)
         except Exception as exc:
             self.error = str(exc)
             self.handle = None
@@ -762,14 +765,14 @@ class LogWriter:
                 if ev is None:
                     done = True
                     continue
-                if self.max_bytes and self.written >= self.max_bytes:
+                if self.room and self.written >= self.room:
                     self.dropped += 1
                     continue
                 rows = ev.log_lines()
-                self.written += sum(len(row) + 1 for row in rows)
+                self.written += log_bytes("\n".join(rows) + "\n")
                 self.events.append(ev)
                 lines.extend(rows)
-            if self.max_bytes and self.written >= self.max_bytes and not self.capped:
+            if self.room and self.written >= self.room and not self.capped:
                 self.capped = True
                 lines.append("(the log stops here: it reached its %d MB limit)" % (self.max_bytes // (1024 * 1024)))
             if self.handle is not None and lines:
@@ -861,6 +864,8 @@ class Store:
 
 
 DEFAULT_LOG_MB = 30
+LOG_FOOTER_ROOM = 65536
+PROCMON_ROW_LIMIT = 1000000
 EXCLUSION_PARTS = 4
 DEFAULT_EXCLUSIONS = (
     "ProcMon | info | RegQueryValue HKCU\\SOFTWARE\\Microsoft\\Windows\\DWM\\ColorPrevalence",
@@ -876,6 +881,10 @@ EXCLUSION_HELP = (
 )
 
 
+def log_bytes(text):
+    return len(text.encode("utf-8", "replace"))
+
+
 def parse_exclusion(line):
     line = (line or "").strip()
     if not line or line[0] in "#;":
@@ -887,8 +896,9 @@ def parse_exclusion(line):
 
 
 class Exclusions:
-    def __init__(self, lines=(), log_mb=DEFAULT_LOG_MB, enabled=True):
+    def __init__(self, lines=(), log_mb=DEFAULT_LOG_MB, enabled=True, procmon_rows=PROCMON_ROW_LIMIT):
         self.log_mb = log_mb
+        self.procmon_rows = procmon_rows
         self.enabled = enabled
         self.blocked = 0
         self.lines = []
@@ -925,6 +935,7 @@ class Exclusions:
 def load_exclusions(path=EXCLUSIONS_PATH):
     lines = list(DEFAULT_EXCLUSIONS)
     log_mb = DEFAULT_LOG_MB
+    rows = PROCMON_ROW_LIMIT
     enabled = True
     parser = configparser.ConfigParser(interpolation=None)
     try:
@@ -934,9 +945,10 @@ def load_exclusions(path=EXCLUSIONS_PATH):
                 lines = [row for row in found if row]
             enabled = parser.getboolean("Exclusions", "enabled", fallback=True)
             log_mb = parser.getint("Options", "max_log_mb", fallback=DEFAULT_LOG_MB)
+            rows = parser.getint("Options", "max_procmon_rows", fallback=PROCMON_ROW_LIMIT)
     except (configparser.Error, OSError, ValueError) as exc:
         LOG.warning("Exclusions could not be read from %s: %s", path, exc)
-    return Exclusions(lines, max(1, min(log_mb, 4096)), enabled)
+    return Exclusions(lines, max(1, min(log_mb, 4096)), enabled, max(1000, min(rows, PROCMON_ROW_LIMIT)))
 
 
 def save_exclusions(rules, path=EXCLUSIONS_PATH):
@@ -952,6 +964,7 @@ def save_exclusions(rules, path=EXCLUSIONS_PATH):
     body.append("")
     body.append("[Options]")
     body.append("max_log_mb = %d" % rules.log_mb)
+    body.append("max_procmon_rows = %d" % rules.procmon_rows)
     body.append("")
     try:
         temp = path + ".tmp"
@@ -2313,7 +2326,6 @@ PROCMON_FILE_WRITES = frozenset(("WriteFile", "SetDispositionInformationFile", "
                                  "SetRenameInformationExBypassAccessCheck", "SetSecurityFile"))
 PROCMON_PROCESS_OPS = frozenset(("Process Create", "Process Exit", "Process Start", "Thread Create", "Thread Exit",
                                  "Load Image", "Process Statistics", "Process Profiling", "Thread Profiling"))
-PROCMON_ROW_LIMIT = 1000000
 PROCMON_KEEP = 5
 TIME_OF_DAY_RE = re.compile(r"(\d{1,2}):(\d{2}):(\d{2})(?:[.,](\d+))?\s*([AaPp])?")
 
@@ -2350,6 +2362,9 @@ class ProcmonDigest:
         self.reg_writes = 0
         self.file_writes = 0
         self.reads = 0
+
+    def full(self):
+        return len(self.rows) >= self.limit
 
     def add(self, ts, proc, pid, operation, path, result):
         self.total += 1
@@ -2495,17 +2510,26 @@ class ProcMonSource(Source):
                 pids.add(pid)
         return pids
 
-    def _close(self, abort):
-        pids = self._procmon_pids()
-        if not pids:
-            return True
-        for pid in pids:
-            _safe(lambda: run_hidden(["taskkill", "/PID", str(pid), "/T"], 15))
-        end = time.time() + (5.0 if abort else 45.0)
+    def _wait_gone(self, seconds):
+        end = time.time() + seconds
         while time.time() < end:
             if not self._procmon_pids():
                 return True
-            time.sleep(0.5)
+            self.status("finishing", "closing ProcMon, %d s left" % max(0, int(end - time.time())))
+            time.sleep(0.25)
+        return not self._procmon_pids()
+
+    def _close(self, abort):
+        if not self._procmon_pids():
+            return True
+        self.status("finishing", "asking ProcMon to stop")
+        _safe(lambda: run_hidden([self.exe, "/AcceptEula", "/Terminate"], 25))
+        if self._wait_gone(3.0 if abort else 8.0):
+            return True
+        for pid in self._procmon_pids():
+            _safe(lambda: run_hidden(["taskkill", "/PID", str(pid), "/T"], 15))
+        if self._wait_gone(3.0 if abort else 12.0):
+            return True
         for pid in self._procmon_pids():
             _safe(lambda: run_hidden(["taskkill", "/F", "/PID", str(pid), "/T"], 15))
         time.sleep(1.0)
@@ -2540,6 +2564,11 @@ class ProcMonSource(Source):
                         if self.session.abort_event.is_set():
                             return False, "closed"
                         last = self._progress(index, total, last)
+                    if digest.full():
+                        left = total - index
+                        digest.total += left
+                        digest.over += left
+                        return True, "stopped at %s of %s" % (plural(index, "event"), plural(total, "event"))
                     ev = reader[index]
                     group = ev.event_class.name
                     if group == "Profiling":
@@ -2570,6 +2599,10 @@ class ProcMonSource(Source):
             count += 1
             if count % 5000 == 0 and self.session.abort_event.is_set():
                 return False, "closed"
+            if digest.full():
+                digest.total += 1
+                digest.over += 1
+                continue
             digest.add(procmon_time_of_day(row.get("Time of Day", ""), self.session.started),
                        row.get("Process Name") or "", as_int(row.get("PID"), 0), (row.get("Operation") or "").strip(),
                        self._fix_path(row.get("Path") or ""), (row.get("Result") or "").strip())
@@ -2584,7 +2617,9 @@ class ProcMonSource(Source):
             self.note("ProcMon did not close in time, so it was stopped", WARN)
         if abort or not self.capturing or not os.path.isfile(self.pml):
             return
-        digest = ProcmonDigest(os.getpid())
+        rules = self.hub.exclusions
+        digest = ProcmonDigest(os.getpid(),
+                               rules.procmon_rows if rules is not None else PROCMON_ROW_LIMIT)
         ok, info = self._read_pml(digest)
         if not ok and not self.session.abort_event.is_set():
             ok, info = self._read_csv(digest)
@@ -4418,37 +4453,48 @@ class App:
         ttk.Button(row, text="Back to the defaults", command=defaults).pack(side="left")
         box.focus_set()
 
+    def _dialog_field(self, window, label, suffix, initial):
+        row = tk.Frame(window, bg=Theme.PANEL)
+        row.pack(fill="x", padx=self.px(12), pady=self.px(6))
+        tk.Label(row, text=label, bg=Theme.PANEL, fg=Theme.FG, width=13, anchor="w",
+                 font=self.fonts["ui"]).pack(side="left", padx=(0, self.px(8)))
+        value = tk.StringVar(value=initial)
+        entry = ttk.Entry(row, textvariable=value, width=10, font=self.fonts["mono"])
+        entry.pack(side="left")
+        tk.Label(row, text=suffix, bg=Theme.PANEL, fg=Theme.DIM,
+                 font=self.fonts["ui"]).pack(side="left", padx=self.px(6))
+        return value, entry
+
     def edit_options(self):
         window = self._dialog("Options")
         self._dialog_note(window, "How large the trace log on disk may grow.", Theme.FG)
         self._dialog_note(window, "The trace stops writing to the log once it reaches this, and says so in "
                                   "the log and in the footer. The timeline keeps going.", Theme.DIM)
-        row = tk.Frame(window, bg=Theme.PANEL)
-        row.pack(fill="x", padx=self.px(12), pady=self.px(10))
-        tk.Label(row, text="Log limit", bg=Theme.PANEL, fg=Theme.FG,
-                 font=self.fonts["ui"]).pack(side="left", padx=(0, self.px(8)))
-        value = tk.StringVar(value=str(self.rules.log_mb))
-        entry = ttk.Entry(row, textvariable=value, width=8, font=self.fonts["mono"])
-        entry.pack(side="left")
-        tk.Label(row, text="MB", bg=Theme.PANEL, fg=Theme.DIM,
-                 font=self.fonts["ui"]).pack(side="left", padx=self.px(6))
+        size_value, entry = self._dialog_field(window, "Log limit", "MB", str(self.rules.log_mb))
+        self._dialog_note(window, "How many ProcMon rows one trace may read back.", Theme.FG)
+        self._dialog_note(window, "ProcMon is read after you press Stop, so this is what decides how long "
+                                  "the finish takes. Lower it when a trace takes minutes to end.", Theme.DIM)
+        rows_value, _rows = self._dialog_field(window, "ProcMon rows", "rows", str(self.rules.procmon_rows))
         self._dialog_note(window, "Saved in " + EXCLUSIONS_PATH, Theme.DIM)
         buttons = tk.Frame(window, bg=Theme.PANEL)
         buttons.pack(fill="x", padx=self.px(12), pady=self.px(10))
 
         def keep():
             try:
-                size = int(value.get().strip())
+                size = int(size_value.get().strip())
+                rows = int(rows_value.get().strip())
             except ValueError:
-                self.flash("The log limit has to be a whole number of megabytes")
+                self.flash("The log limit and the ProcMon row count both have to be whole numbers")
                 return
             self.rules.log_mb = max(1, min(size, 4096))
+            self.rules.procmon_rows = max(1000, min(rows, PROCMON_ROW_LIMIT))
             error = save_exclusions(self.rules)
             window.destroy()
             if error:
-                self.flash("The limit could not be saved: " + one_line(error, 120))
+                self.flash("The options could not be saved: " + one_line(error, 120))
             else:
-                self.flash("The log limit is %d MB from the next trace on" % self.rules.log_mb)
+                self.flash("From the next trace on the log stops at %d MB and ProcMon at %d rows"
+                           % (self.rules.log_mb, self.rules.procmon_rows))
 
         ttk.Button(buttons, text="Save", style="Accent.TButton", command=keep).pack(side="right", padx=self.px(2))
         ttk.Button(buttons, text="Cancel", command=window.destroy).pack(side="right", padx=self.px(2))
