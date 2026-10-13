@@ -59,7 +59,19 @@ jobs:
           Copy-Item procmon/Procmon64.exe dist/
 
       - name: Self-test Bastard.exe
+        env:
+          BASTARD_SELFTEST_KEEP: selftest
         run: python tools/run_selftest.py dist/Bastard.exe
+
+      - name: Keep the self-test results
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          name: selftest
+          path: selftest
+          if-no-files-found: ignore
+          retention-days: 14
 
       - name: Keep the build
         uses: actions/upload-artifact@v7

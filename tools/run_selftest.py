@@ -66,6 +66,17 @@ def cleanup_registry():
             pass
 
 
+def etw_session_state(path):
+    try:
+        result = subprocess.run(["logman", "query", "Bastard ETW Trace", "-ets"], capture_output=True, text=True,
+                                timeout=10)
+        text = result.stdout + result.stderr
+    except (OSError, subprocess.SubprocessError) as exc:
+        text = str(exc)
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(text)
+
+
 def run_actions(folder, log):
     first = os.path.join(folder, "x.txt")
     second = os.path.join(folder, "y.txt")
@@ -81,9 +92,12 @@ def run_actions(folder, log):
     os.remove(second)
     log["files"] = True
     time.sleep(0.8)
+    keep = IS_WIN and os.environ.get("BASTARD_SELFTEST_KEEP")
     if IS_WIN:
         registry_actions()
         log["registry"] = True
+        if keep:
+            etw_session_state(os.path.join(os.path.dirname(folder), "etw_session_during.txt"))
     time.sleep(0.5)
     child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(1.5)"])
     log["child_pid"] = child.pid
@@ -115,6 +129,8 @@ def run_actions(folder, log):
         with open(os.path.join(folder, "tick.txt"), "w", encoding="utf-8") as fh:
             fh.write(str(index))
         time.sleep(0.5)
+    if keep:
+        etw_session_state(os.path.join(os.path.dirname(folder), "etw_session_end.txt"))
 
 
 def check(result, log, returncode):
@@ -241,6 +257,9 @@ def main(argv):
                 shutil.copy2(path, os.path.join(keep, name))
         if result.get("log_path") and os.path.isfile(result["log_path"]):
             shutil.copy2(result["log_path"], os.path.join(keep, os.path.basename(result["log_path"])))
+        app_log = os.path.join(os.environ.get("LOCALAPPDATA", ""), "Bastard", "Bastard.log")
+        if os.path.isfile(app_log):
+            shutil.copy2(app_log, os.path.join(keep, "Bastard.log"))
     shutil.rmtree(work, ignore_errors=True)
     print("%d hard checks failed" % failed if failed else "All hard checks passed")
     return 1 if failed else 0
