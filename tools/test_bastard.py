@@ -5,9 +5,11 @@ import io
 import json
 import os
 import queue
+import random
 import shutil
 import sys
 import tempfile
+import threading
 import time
 import unittest
 
@@ -37,6 +39,28 @@ def event(ts, source="Files", kind="File", level="change", text="x", proc="", pi
 
 
 event.counter = 0
+
+
+class FakeSession:
+    def __init__(self, hub=None):
+        self.hub = hub if hub is not None else b.Hub()
+        self.markers = []
+        self.stop_event = threading.Event()
+        self.abort_event = threading.Event()
+        self.admin = False
+
+
+def drained(hub):
+    out = []
+    while True:
+        try:
+            out.append(hub.ui.get_nowait())
+        except queue.Empty:
+            return out
+
+
+def filetime(epoch):
+    return int(epoch * 10000000) + b.FILETIME_EPOCH
 
 
 class Formatting(unittest.TestCase):
@@ -254,6 +278,85 @@ class NewSources(unittest.TestCase):
     def test_appprivacy_words(self):
         self.assertEqual(b.PROBE_APPPRIVACY_WORDS[2], "2 (force deny)")
         self.assertEqual(b.PROBE_APPPRIVACY_WORDS[0], "0 (user in control)")
+
+    def test_only_a_refusal_counts_as_denied(self):
+        for text in ("Status=0x80070005", "Status=0xC0000022", "hr=0x80070522", "Access is denied",
+                     "[Kernel-File] Status=0xc0000022 | FileName=C:\\x.jpg"):
+            self.assertTrue(b.says_denied(text), text)
+        for text in ("Status=0x80070002", "Status=0x80070003", "hr=0x8007000E", "Status=0x800700051",
+                     "Status=0x0", "FileName=C:\\Users\\me\\0x8007.txt"):
+            self.assertFalse(b.says_denied(text), text)
+
+    def etw_event(self, data):
+        hub = b.Hub()
+        source = b.EtwRawSource(FakeSession(hub))
+        source.own_pid = -1
+        source._on((12, data))
+        events = drained(hub)
+        self.assertEqual(len(events), 1)
+        return events[0]
+
+    def test_an_etw_row_is_a_problem_only_when_it_was_refused(self):
+        header = {"ProcessId": 4321, "TimeStamp": filetime(time.time())}
+        missing = self.etw_event({"EventHeader": header, "ProviderName": "Kernel-File", "Status": "0x80070002",
+                                  "FileName": "C:\\gone.jpg"})
+        self.assertEqual(missing.level, b.INFO)
+        refused = self.etw_event({"EventHeader": header, "ProviderName": "Kernel-File", "Status": "0xc0000022",
+                                  "FileName": "C:\\x.jpg"})
+        self.assertEqual(refused.level, b.ERROR)
+
+    def test_an_etw_row_names_its_process(self):
+        b.PROCESS_NAMES.put(4321, "Photos.exe")
+        header = {"ProcessId": 4321, "TimeStamp": filetime(time.time())}
+        ev = self.etw_event({"EventHeader": header, "ProviderName": "Kernel-Registry", "KeyName": "HKCU\\X"})
+        self.assertEqual((ev.pid, ev.proc), (4321, "Photos.exe"))
+        self.assertEqual(ev.who(), "Photos.exe (PID 4321)")
+        self.assertEqual(b.process_exclusion_from(ev), "ETW | | Photos.exe")
+
+    def test_trace_tools_rows_keep_the_time_they_happened(self):
+        folder = tempfile.mkdtemp(prefix="bastard_trace_")
+        try:
+            start = time.time() - 120
+            rows = [["Event Name", "Type", "PID", "Clock-Time", "User Data"],
+                    ["FileIo", "Create", "0x00001F40", str(filetime(start + 2.5)), "C:\\a.jpg"],
+                    ["Registry", "SetValue", "0x00001F40", str(filetime(start + 30.0)), "Status=0xC0000022"],
+                    ["FileIo", "Create", "0x00001F40", str(filetime(start + 31.0)), "Status=0x80070002"]]
+            path = os.path.join(folder, "trace.csv")
+            with open(path, "w", encoding="utf-8", newline="") as fh:
+                fh.write("\r\n".join(",  ".join(row) for row in rows) + "\r\n")
+            hub = b.Hub()
+            session = FakeSession(hub)
+            session.markers = [(1, start + 1.0), (2, start + 60.0)]
+            source = b.TraceToolSource(session)
+            source.mode = "logman"
+            source.etl = os.path.join(folder, "trace.etl")
+            source._publish(path)
+            events = drained(hub)
+            listed = [ev for ev in events if ev.source == b.SRC_TRACE]
+            self.assertEqual(len(listed), 3)
+            self.assertAlmostEqual(listed[0].ts, start + 2.5, places=3)
+            self.assertAlmostEqual(listed[2].ts, start + 31.0, places=3)
+            self.assertEqual([ev.level for ev in listed], [b.INFO, b.ERROR, b.INFO])
+            marks = [ev.text for ev in events if ev.kind == b.KIND_MARK]
+            self.assertIn("Marker 1: Trace Tools listed 1 event in the 6 seconds after it", marks)
+            self.assertIn("Marker 2: Trace Tools listed 0 events in the 6 seconds after it", marks)
+            self.assertIsNone(b.trace_row_time({"Clock-Time": "not a time"}))
+            self.assertIsNone(b.trace_row_time({"Event Name": "x"}))
+        finally:
+            shutil.rmtree(folder, ignore_errors=True)
+
+    def test_procmon_is_looked_for_next_to_bastard(self):
+        folder = tempfile.mkdtemp(prefix="bastard_pm_")
+        saved = b.PROGRAM_DIR
+        try:
+            b.PROGRAM_DIR = folder
+            path = os.path.join(folder, "Procmon64.exe")
+            open(path, "w").close()
+            self.assertEqual(b.find_procmon(), path)
+            self.assertFalse(hasattr(b, "program_dir"))
+        finally:
+            b.PROGRAM_DIR = saved
+            shutil.rmtree(folder, ignore_errors=True)
 
 
 class Timeline(unittest.TestCase):
@@ -883,6 +986,211 @@ class Timeline(unittest.TestCase):
         self.assertEqual(options["seconds"], 12.0)
         self.assertEqual(b.duration_clock(3725), "01:02:05")
 
+    def test_commented_rules_are_kept_through_a_save_and_a_load(self):
+        folder = tempfile.mkdtemp(prefix="bastard_hash_")
+        try:
+            path = os.path.join(folder, "Exclusions.ini")
+            lines = ["# ProcMon | | chrome.exe", "Files | change | tick.txt", "; ETW | info", "#", ";;"]
+            rules = b.Exclusions(lines, 9, True, 5000)
+            self.assertEqual(b.save_exclusions(rules, path), "")
+            back = b.load_exclusions(path)
+            self.assertEqual(back.lines, lines)
+            self.assertEqual(back.rules, [("files", "change", "tick.txt", "")])
+            self.assertEqual((back.enabled, back.log_mb, back.procmon_rows), (True, 9, 5000))
+            self.assertEqual(b.load_exclusions(path).lines, lines)
+        finally:
+            shutil.rmtree(folder, ignore_errors=True)
+
+    def test_a_hand_written_filter_file_still_loads(self):
+        folder = tempfile.mkdtemp(prefix="bastard_hand_")
+        try:
+            path = os.path.join(folder, "Exclusions.ini")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write("; a note at the top\n# another\n[Exclusions]\n# a note in the section\nenabled = no\n"
+                         "rules = Files | change | a.txt\n    ; Files | change | b.txt\n\n    Files | | c.txt\n"
+                         "[Options]\nmax_log_mb = 12\n")
+            back = b.load_exclusions(path)
+            self.assertEqual(back.lines, ["Files | change | a.txt", "; Files | change | b.txt", "Files | | c.txt"])
+            self.assertEqual((back.enabled, back.log_mb), (False, 12))
+        finally:
+            shutil.rmtree(folder, ignore_errors=True)
+
+    def test_the_counters_add_up_when_many_threads_count_at_once(self):
+        hub = b.Hub(b.Exclusions(["Files | | noise"]))
+
+        def send(text):
+            for _index in range(3000):
+                hub.emit(b.SRC_FILES, b.KIND_FILE, text)
+
+        for text in ("noise", "late"):
+            if text == "late":
+                hub.closed = True
+            threads = [threading.Thread(target=send, args=(text,)) for _index in range(8)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join()
+        self.assertEqual(hub.exclusions.blocked, 24000)
+        self.assertEqual(hub.late, 24000)
+
+    def test_a_check_that_only_looks_counts_nothing(self):
+        rules = b.Exclusions(["Files | | noise"])
+        self.assertTrue(rules.blocks(b.SRC_FILES, b.CHANGE, "noise", count=False))
+        self.assertEqual(rules.blocked, 0)
+        self.assertTrue(rules.blocks(b.SRC_FILES, b.CHANGE, "noise"))
+        self.assertEqual(rules.blocked, 1)
+
+    def test_the_left_out_count_starts_again_with_each_trace(self):
+        hub = b.Hub(b.Exclusions(["Files | | noise"]))
+        hub.emit(b.SRC_FILES, b.KIND_FILE, "noise")
+        self.assertEqual(hub.exclusions.blocked, 1)
+        hub.reset([b.SRC_FILES])
+        self.assertEqual(hub.exclusions.blocked, 0)
+
+    def test_the_log_writer_can_be_waited_on(self):
+        folder = tempfile.mkdtemp(prefix="bastard_flush_")
+        try:
+            writer = b.LogWriter(os.path.join(folder, "t.log"), ["Header"])
+            self.assertTrue(writer.start())
+            for index in range(20000):
+                writer.put(event(float(index), text="line %d" % index))
+            self.assertTrue(writer.flush(30.0))
+            self.assertEqual(len(writer.events), 20000)
+            writer.close(["Summary"], False)
+            self.assertFalse(writer.flush(1.0))
+        finally:
+            shutil.rmtree(folder, ignore_errors=True)
+
+    def test_the_marker_summary_at_stop_counts_every_event_sent_before_it(self):
+        folder = tempfile.mkdtemp(prefix="bastard_stop_")
+        saved = b.PROGRAM_DIR
+        try:
+            b.PROGRAM_DIR = folder
+            hub = b.Hub()
+            session = b.Session(hub, b.parse_options([]))
+            session.sources = []
+            session.writer = b.LogWriter(session.log_path, session.header())
+            self.assertTrue(session.writer.start())
+            hub.writer = session.writer
+            start = time.time() - 30
+            session.markers.append((1, start))
+            for index in range(30000):
+                hub.emit(b.SRC_FILES, b.KIND_FILE, "File changed: %d" % index, b.CHANGE, ts=start + 1 + index % 5)
+            session.request_stop()
+            session.finish()
+            summary = [ev.text for ev in drained(hub) if ev.text.startswith("Marker 1:")]
+            self.assertEqual(summary, ["Marker 1: 30000 events in the 6 seconds after it (Files 30000)"])
+        finally:
+            b.PROGRAM_DIR = saved
+            shutil.rmtree(folder, ignore_errors=True)
+
+    def test_only_the_newest_trace_logs_are_kept(self):
+        folder = tempfile.mkdtemp(prefix="bastard_tidy_")
+        try:
+            names = ["Bastard_202610%02d_101010.log" % day for day in range(1, 9)]
+            others = ["Bastard.log", "Bastard_notes.log", "Bastard_20261001_101010.csv", "Bastard_20261001_1010.log",
+                      "notes.txt"]
+            for name in names + others:
+                with open(os.path.join(folder, name), "w", encoding="utf-8") as fh:
+                    fh.write("x")
+            self.assertEqual(b.tidy_trace_logs(folder, b.TRACE_LOG_KEEP - 1), names[:4])
+            self.assertEqual(sorted(os.listdir(folder)), sorted(names[4:] + others))
+            self.assertEqual(b.tidy_trace_logs(folder, b.TRACE_LOG_KEEP - 1), [])
+            self.assertEqual(b.tidy_trace_logs(os.path.join(folder, "missing"), 4), [])
+        finally:
+            shutil.rmtree(folder, ignore_errors=True)
+
+
+class Processes(unittest.TestCase):
+    def source(self):
+        class Fake(b.ProcessSource):
+            def __init__(self):
+                self.seen = []
+                self.lock = threading.Lock()
+                self.known = {}
+                self.reported = {}
+                self.ended = {}
+                self.pending = []
+                self.etw = None
+                self.etw_active = False
+                self.etw_hits = 0
+                self.etw_misses = 0
+                self.tables = []
+                self.session = FakeSession()
+
+            def wait(self, _seconds):
+                return not self.tables
+
+            def emit(self, kind, text, level=b.INFO, pid=None, proc="", detail="", ts=None):
+                self.seen.append(text)
+
+        return Fake()
+
+    def poll(self, source, *tables):
+        saved = (b.process_table, b.psutil)
+        source.tables = list(tables)
+        try:
+            b.process_table = lambda known=None: source.tables.pop(0)
+            b.psutil = None
+            source._poll()
+        finally:
+            b.process_table, b.psutil = saved
+        return source.seen
+
+    def info(self, pid, name, ctime):
+        return {"pid": pid, "name": name, "ctime": ctime, "ppid": 0}
+
+    def test_a_pid_taken_over_between_two_polls_is_reported(self):
+        now = time.time()
+        source = self.source()
+        first = self.info(3999001, "first.exe", now - 10.0)
+        source.known = {3999001: first}
+        second = self.info(3999001, "second.exe", now - 2.0)
+        seen = self.poll(source, {3999001: second}, {})
+        self.assertEqual(len(seen), 3, seen)
+        self.assertEqual(seen[0], "Exited first.exe (PID 3999001) after 8.0 s")
+        self.assertEqual(seen[1], "Started second.exe (PID 3999001)")
+        self.assertTrue(seen[2].startswith("Exited second.exe (PID 3999001) after"), seen)
+
+    def test_a_pid_taken_over_soon_after_is_reported_in_full(self):
+        now = time.time()
+        source = self.source()
+        source.known = {3999002: self.info(3999002, "first.exe", now - 3.0)}
+        seen = self.poll(source, {}, {3999002: self.info(3999002, "second.exe", now - 1.0)}, {})
+        self.assertEqual(len(seen), 3, seen)
+        self.assertTrue(seen[0].startswith("Exited first.exe (PID 3999002)"), seen)
+        self.assertEqual(seen[1], "Started second.exe (PID 3999002)")
+        self.assertTrue(seen[2].startswith("Exited second.exe (PID 3999002)"), seen)
+
+    def test_kernel_events_and_the_poll_still_report_a_process_once(self):
+        now = time.time()
+        source = self.source()
+        source.etw_active = True
+        info = self.info(3999003, "quick.exe", now - 1.0)
+        source.etw_started(3999003, 0, "", now - 1.0, "")
+        source._new(info, now)
+        source.etw_exited(3999003, 0, "", now - 0.5)
+        source._gone(info, now)
+        source._flush(now + 10.0)
+        self.assertEqual(len(source.seen), 2, source.seen)
+
+    def test_a_process_is_read_again_only_when_its_pid_changed_hands(self):
+        class Proc:
+            def __init__(self, alive):
+                self.alive = alive
+
+            def is_running(self):
+                return self.alive
+
+        self.assertTrue(b.same_process({"proc": Proc(True)}))
+        self.assertFalse(b.same_process({"proc": Proc(False)}))
+        self.assertTrue(b.same_process({}))
+        if b.psutil is not None:
+            table = b.process_table()
+            mine = table[os.getpid()]
+            self.assertTrue(b.same_process(mine))
+            self.assertIs(b.process_table(table)[os.getpid()], mine)
+
 
 class Window(unittest.TestCase):
     def setUp(self):
@@ -1071,9 +1379,9 @@ class Window(unittest.TestCase):
         self.assertEqual(len(app.tree.get_children()), 4)
         app.hub.emit(b.SRC_FILES, b.KIND_FILE, "File changed: late", b.CHANGE, ts=now - 5)
         app._drain()
-        app.root.after_cancel(app.rebuild_job)
-        app._rebuild()
+        self.assertIsNone(app.rebuild_job)
         self.assertEqual(app.tree.get_children()[0], str(app.store.events()[0].seq))
+        self.assertEqual(len(app.tree.get_children()), 5)
         app.show_box.current(2)
         app._filters_changed()
         app._rebuild()
@@ -1106,6 +1414,182 @@ class Window(unittest.TestCase):
             saved = json.load(fh)
         self.assertEqual(saved["show"], 0)
         self.assertTrue(saved["sources"][b.SRC_PROC])
+
+    def test_a_sorted_list_takes_new_rows_without_a_full_redraw(self):
+        scale = b.setup_style(self.root)
+        app = b.App(self.root, b.parse_options([]), scale)
+        app._sort_by("process")
+        now = time.time()
+        names = ["delta.exe", "alpha.exe", "echo.exe", "charlie.exe", "bravo.exe"]
+        for index in range(200):
+            app.hub.emit(b.SRC_PROC, b.KIND_PROC, "Started %d" % index, proc=names[index % 5], ts=now + index)
+        app._drain()
+        calls = {"match": 0, "rebuild": 0}
+        match, rebuild = app._match, app._rebuild
+
+        def counted_match(ev):
+            calls["match"] += 1
+            return match(ev)
+
+        def counted_rebuild(*args):
+            calls["rebuild"] += 1
+            return rebuild(*args)
+
+        app._match = counted_match
+        app._rebuild = counted_rebuild
+        for index in range(30):
+            app.hub.emit(b.SRC_PROC, b.KIND_PROC, "Later %d" % index, proc=names[index % 5], ts=now + 500 + index)
+        app._drain()
+        self.assertEqual(calls, {"match": 30, "rebuild": 0})
+        self.assertIsNone(app.rebuild_job)
+        self.assertIsNone(app.reload_job)
+        listed = [app.store.by_seq[int(iid)] for iid in app.tree.get_children()]
+        self.assertEqual(len(listed), 230)
+        self.assertEqual(listed, sorted(listed, key=b.SORT_KEYS["process"]))
+
+    def test_the_list_always_shows_what_a_full_redraw_would(self):
+        scale = b.setup_style(self.root)
+        app = b.App(self.root, b.parse_options([]), scale)
+        saved = (b.VIEW_LIMIT, b.MERGE_LIMIT)
+        rng = random.Random(30)
+        names = ["delta.exe", "alpha.exe", "echo.exe", "", "bravo.exe"]
+        orders = [("", False), ("time", True), ("process", False), ("process", True), ("event", False),
+                  ("pid", True), ("source", False), ("kind", True)]
+        try:
+            b.VIEW_LIMIT = 40
+            b.MERGE_LIMIT = 6
+            now = time.time()
+            for step in range(160):
+                if step % 20 == 0:
+                    app.sort_column, app.sort_down = orders[step // 20]
+                    app._paint_headings()
+                    app._reload(False)
+                if step % 25 == 12:
+                    app.rows[b.SRC_REG].toggle()
+                for _index in range(rng.randint(1, 25)):
+                    ts = now + step + rng.random() if rng.random() < 0.6 else now + rng.uniform(0, step + 1)
+                    app.hub.emit(rng.choice((b.SRC_PROC, b.SRC_REG, b.SRC_FILES)), rng.choice((b.KIND_PROC, b.KIND_FILE)),
+                                 "row %d" % rng.randint(0, 999), rng.choice((b.INFO, b.CHANGE, b.ERROR)),
+                                 pid=rng.randint(1, 50), proc=rng.choice(names), ts=ts)
+                app._drain()
+                if app.rebuild_job is not None:
+                    self.root.after_cancel(app.rebuild_job)
+                    app._rebuild()
+                if app.reload_job is not None:
+                    self.root.after_cancel(app.reload_job)
+                    app._reload()
+                key, down = app._order()
+                matches = [ev for ev in app.store.events() if app._match(ev)]
+                newest = matches[-b.VIEW_LIMIT:]
+                wanted = [str(ev.seq) for ev in sorted(newest, key=key, reverse=down)]
+                self.assertEqual(list(app.tree.get_children()), wanted, step)
+                self.assertEqual(app.shown, sorted(key(ev) for ev in newest), step)
+                self.assertEqual((app.match_count, app.view_count), (len(matches), len(newest)), step)
+        finally:
+            b.VIEW_LIMIT, b.MERGE_LIMIT = saved
+
+    def test_many_rows_arriving_out_of_order_are_drawn_in_one_go(self):
+        scale = b.setup_style(self.root)
+        app = b.App(self.root, b.parse_options([]), scale)
+        now = time.time()
+        for index in range(100):
+            app.hub.emit(b.SRC_REG, b.KIND_REG, "HKCU\\Software\\Live%d" % index, b.CHANGE, ts=now + index)
+        app._drain()
+        for index in range(b.MERGE_LIMIT + 50):
+            app.hub.emit(b.SRC_PM, b.KIND_REG, "RegSetValue HKCU\\Software\\Late%d" % index, b.CHANGE,
+                         ts=now + index * 100.0 / (b.MERGE_LIMIT + 50))
+        app._drain()
+        self.assertIsNotNone(app.reload_job)
+        self.assertEqual(len(app.tree.get_children()), 100)
+        self.root.after_cancel(app.reload_job)
+        app._reload()
+        self.assertIsNone(app.reload_job)
+        listed = [app.store.by_seq[int(iid)] for iid in app.tree.get_children()]
+        self.assertEqual(len(listed), 150 + b.MERGE_LIMIT)
+        self.assertEqual(listed, sorted(listed, key=b.Event.key))
+
+    def test_a_list_scrolled_up_keeps_its_place_when_older_rows_arrive(self):
+        scale = b.setup_style(self.root)
+        app = b.App(self.root, b.parse_options([]), scale)
+        self.root.deiconify()
+        self.root.geometry("1200x700")
+        now = time.time()
+        for index in range(400):
+            app.hub.emit(b.SRC_REG, b.KIND_REG, "HKCU\\Software\\Thing%d" % index, b.CHANGE, ts=now + index)
+        app._drain()
+        self.root.update()
+        app.tree.yview(200)
+        self.root.update()
+        top = app.tree.get_children()[200]
+        before = app.tree.bbox(top)
+        self.assertTrue(before)
+        for index in range(30):
+            app.hub.emit(b.SRC_REG, b.KIND_REG, "HKCU\\Software\\Early%d" % index, b.CHANGE, ts=now - 100 + index)
+        app._drain()
+        self.root.update()
+        self.assertEqual(app.tree.get_children()[230], top)
+        self.assertEqual(app.tree.bbox(top), before)
+
+    def test_the_list_follows_new_rows_when_it_is_at_the_bottom(self):
+        scale = b.setup_style(self.root)
+        app = b.App(self.root, b.parse_options([]), scale)
+        self.root.deiconify()
+        self.root.geometry("1200x700")
+        now = time.time()
+        for index in range(400):
+            app.hub.emit(b.SRC_REG, b.KIND_REG, "HKCU\\Software\\Thing%d" % index, b.CHANGE, ts=now + index)
+        app._drain()
+        self.root.update()
+        app.tree.yview_moveto(1.0)
+        self.root.update()
+        last = None
+        for index in range(50):
+            last = app.hub.emit(b.SRC_REG, b.KIND_REG, "HKCU\\Software\\New%d" % index, b.CHANGE, ts=now + 500 + index)
+        app._drain()
+        self.root.update()
+        self.assertEqual(app.tree.get_children()[-1], str(last.seq))
+        self.assertGreaterEqual(app.tree.yview()[1], 0.999)
+
+    def test_redrawing_the_list_adds_nothing_to_the_left_out_count(self):
+        scale = b.setup_style(self.root)
+        app = b.App(self.root, b.parse_options([]), scale)
+        now = time.time()
+        for index in range(20):
+            app.hub.emit(b.SRC_FILES, b.KIND_FILE, "File changed: tick%d.txt" % index, b.CHANGE, ts=now + index)
+        app._drain()
+        self.assertEqual(len(app.tree.get_children()), 20)
+        app.rules.set_lines(["Files | | tick"])
+        app.rules.enabled = True
+        app.rules.reset_count()
+        for _index in range(3):
+            app._rebuild()
+        self.assertEqual(len(app.tree.get_children()), 0)
+        self.assertEqual(app.rules.blocked, 0)
+
+    def test_a_rule_from_the_menu_leaves_the_filter_switch_alone(self):
+        scale = b.setup_style(self.root)
+        app = b.App(self.root, b.parse_options([]), scale)
+        saved = b.save_exclusions
+        written = []
+        try:
+            b.save_exclusions = lambda rules, path=None: written.append(list(rules.lines)) or ""
+            app.rules.enabled = False
+            ev = app.hub.emit(b.SRC_PROC, b.KIND_PROC, "Started noisy.exe (PID 7)", pid=7, proc="noisy.exe")
+            app._drain()
+            app.menu_row = str(ev.seq)
+            app.exclude_process()
+            self.assertFalse(app.rules.enabled)
+            self.assertEqual(app.rules.lines[-1], "Processes | | noisy.exe")
+            self.assertEqual(written, [app.rules.lines])
+            self.assertIn("Use these rules is off", app.flash_text)
+            self.assertIsNone(app.rebuild_job)
+            self.assertEqual(len(app.tree.get_children()), 1)
+            app.rules.enabled = True
+            app.exclude_selected()
+            self.assertTrue(app.rules.enabled)
+            self.assertTrue(app.flash_text.startswith("Left out from now on: "), app.flash_text)
+        finally:
+            b.save_exclusions = saved
 
 
 if __name__ == "__main__":

@@ -142,7 +142,7 @@ def check(result, log, returncode):
                                  for ev in events), info=str(child))
     add("marker placed", has(events, "Marker 1", source="System"))
     add("marker summary", any(ev["event"].startswith("Marker 1:") and ev["level"] == "Marker" and "ProcMon" not in ev["event"]
-                              for ev in events))
+                              and "Trace Tools" not in ev["event"] for ev in events))
     add("list shows events", result.get("listed", 0) > 0, info=str(result.get("listed")))
     if IS_WIN:
         add("registry value changed", has(events, "TraceSelfTest", "[A]", "1 (0x1) -> 2 (0x2)", source="Registry"))

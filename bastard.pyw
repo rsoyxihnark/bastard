@@ -25,7 +25,7 @@ import tkinter as tk
 import tkinter.font as tkfont
 from tkinter import filedialog, messagebox, ttk
 
-VERSION = "1.7.0"
+VERSION = "1.7.1"
 
 APP_NAME = "Bastard"
 IS_WIN = os.name == "nt"
@@ -118,6 +118,8 @@ FILETIME_EPOCH = 116444736000000000
 MARKER_WINDOW = 6
 MARKER_DELAY = 8.5
 VIEW_LIMIT = 20000
+MERGE_LIMIT = 500
+RELOAD_DELAY = 500
 STORE_LIMIT = 1000000
 LOUD_SOURCES = frozenset((SRC_ETW, SRC_PM, SRC_TRACE))
 FLOOD_SHARE = 0.8
@@ -125,12 +127,6 @@ SELFTEST_EVENTS = 50000
 INTERNAL_ERRORS = []
 
 FOLDERID_DESKTOP = "B4BFCC3A-DB2C-424C-B029-7FE99A87C641"
-
-
-def program_dir():
-    if getattr(sys, "frozen", False):
-        return os.path.dirname(os.path.abspath(sys.executable))
-    return os.path.dirname(os.path.abspath(__file__))
 
 
 def known_folder(guid_text):
@@ -714,7 +710,8 @@ class Hub:
 
     def emit(self, source, kind, text, level=INFO, pid=None, proc="", detail="", ts=None):
         if self.closed and source != SRC_SYSTEM:
-            self.late += 1
+            with self.lock:
+                self.late += 1
             return None
         text = clean_text(text)
         proc = clean_text(proc)
@@ -756,6 +753,8 @@ class Hub:
             self.late = 0
             for source in sources:
                 self.status[source] = ("idle", "")
+        if self.exclusions is not None:
+            self.exclusions.reset_count()
 
 
 class LogWriter:
@@ -791,6 +790,13 @@ class LogWriter:
     def put(self, ev):
         self.queue.put(ev)
 
+    def flush(self, timeout):
+        if self.thread is None or not self.thread.is_alive():
+            return False
+        reached = threading.Event()
+        self.queue.put(reached)
+        return reached.wait(timeout)
+
     def _run(self):
         done = False
         while not done:
@@ -801,9 +807,13 @@ class LogWriter:
             except queue.Empty:
                 pass
             lines = []
+            reached = []
             for ev in batch:
                 if ev is None:
                     done = True
+                    continue
+                if isinstance(ev, threading.Event):
+                    reached.append(ev)
                     continue
                 if self.room and self.written >= self.room:
                     self.dropped += 1
@@ -821,6 +831,8 @@ class LogWriter:
                     self.handle.flush()
                 except Exception as exc:
                     self.error = str(exc)
+            for item in reached:
+                item.set()
 
     def close(self, footer, rewrite):
         self.queue.put(None)
@@ -905,6 +917,8 @@ class Store:
 
 DEFAULT_LOG_MB = 28
 LOG_FOOTER_ROOM = 65536
+TRACE_LOG_KEEP = 5
+TRACE_LOG_RE = re.compile(r"^Bastard_\d{8}_\d{6}\.log$")
 LOG_NEWLINE = "\r\n" if IS_WIN else "\n"
 LINE_END_EXTRA = len(LOG_NEWLINE) - 1
 PROCMON_ROW_LIMIT = 1000000
@@ -970,6 +984,21 @@ def log_bytes(text):
     return len(text.encode("utf-8", "replace")) + text.count("\n") * LINE_END_EXTRA
 
 
+def tidy_trace_logs(folder, keep):
+    try:
+        names = sorted(name for name in os.listdir(folder) if TRACE_LOG_RE.match(name))
+    except OSError:
+        return []
+    removed = []
+    for name in names[: max(0, len(names) - keep)]:
+        try:
+            os.remove(os.path.join(folder, name))
+            removed.append(name)
+        except OSError:
+            pass
+    return removed
+
+
 def parse_exclusion(line):
     line = (line or "").strip()
     if not line or line[0] in "#;":
@@ -985,6 +1014,7 @@ class Exclusions:
         self.log_mb = log_mb
         self.procmon_rows = procmon_rows
         self.enabled = enabled
+        self.lock = threading.Lock()
         self.blocked = 0
         self.lines = []
         self.rules = []
@@ -994,7 +1024,7 @@ class Exclusions:
         self.lines = [line.strip() for line in lines if line.strip()]
         self.rules = [rule for rule in (parse_exclusion(line) for line in self.lines) if rule]
 
-    def blocks(self, source, level, text, proc="", detail=""):
+    def blocks(self, source, level, text, proc="", detail="", count=True):
         if not self.enabled or source == SRC_SYSTEM or not self.rules:
             return False
         name = (source or "").lower()
@@ -1011,12 +1041,30 @@ class Exclusions:
                 continue
             if keeps and keeps in low:
                 continue
-            self.blocked += 1
+            if count:
+                with self.lock:
+                    self.blocked += 1
             return True
         return False
 
+    def reset_count(self):
+        with self.lock:
+            self.blocked = 0
+
     def log_bytes(self):
         return max(1, self.log_mb) * 1024 * 1024
+
+
+def rule_lines(path, plain):
+    parser = configparser.ConfigParser(interpolation=None, comment_prefixes=())
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            text = "\n".join(line for line in fh.read().splitlines() if line[:1] not in ("#", ";"))
+        parser.read_string(text, path)
+        plain = parser.get("Exclusions", "rules", fallback=plain)
+    except (configparser.Error, OSError, ValueError):
+        pass
+    return [row.strip() for row in plain.splitlines() if row.strip()]
 
 
 def load_exclusions(path=EXCLUSIONS_PATH):
@@ -1028,8 +1076,7 @@ def load_exclusions(path=EXCLUSIONS_PATH):
     try:
         if parser.read(path, encoding="utf-8"):
             if parser.has_section("Exclusions"):
-                found = [row.strip() for row in parser.get("Exclusions", "rules", fallback="").splitlines()]
-                lines = [row for row in found if row]
+                lines = rule_lines(path, parser.get("Exclusions", "rules", fallback=""))
             enabled = parser.getboolean("Exclusions", "enabled", fallback=True)
             log_mb = parser.getint("Options", "max_log_mb", fallback=DEFAULT_LOG_MB)
             rows = parser.getint("Options", "max_procmon_rows", fallback=PROCMON_ROW_LIMIT)
@@ -1654,20 +1701,25 @@ def process_label(name, pid):
     return "PID %d" % pid
 
 
+def same_process(info):
+    proc = info.get("proc")
+    return proc is None or bool(_safe(proc.is_running, True))
+
+
 def process_table(known=None):
     table = {}
     if psutil is None:
         return table
     for pid in psutil.pids():
         old = known.get(pid) if known else None
-        if old is not None:
+        if old is not None and same_process(old):
             table[pid] = old
             continue
         try:
             proc = psutil.Process(pid)
             with proc.oneshot():
                 info = {"pid": pid, "name": _safe(proc.name, "") or "", "ctime": _safe(proc.create_time, 0.0) or 0.0,
-                        "ppid": _safe(proc.ppid, 0) or 0}
+                        "ppid": _safe(proc.ppid, 0) or 0, "proc": proc}
         except Exception:
             continue
         table[pid] = info
@@ -1722,8 +1774,11 @@ class ProcessSource(Source):
                 LOG.warning("Process list could not be read: %s", exc)
                 continue
             for pid, info in current.items():
-                if pid in self.known:
+                old = self.known.get(pid)
+                if old is info:
                     continue
+                if old is not None:
+                    self._replaced(old, info, now)
                 PROCESS_NAMES.put(pid, info["name"])
                 self._new(info, now)
             for pid, info in self.known.items():
@@ -1731,6 +1786,9 @@ class ProcessSource(Source):
                     self._gone(info, now)
             self.known = current
             self._flush(now)
+
+    def _replaced(self, old, info, now):
+        self._gone(old, min(now, info["ctime"]) if info["ctime"] else now)
 
     def _new(self, info, now):
         if self.etw_active:
@@ -1763,7 +1821,7 @@ class ProcessSource(Source):
         pid = info["pid"]
         with self.lock:
             seen = self.reported.get(pid)
-            if seen is not None and abs(seen - info["ctime"]) < 2.0:
+            if self.etw_hits and seen is not None and abs(seen - info["ctime"]) < 2.0:
                 return
             self.reported[pid] = info["ctime"]
             silent = self.etw_active and self.etw_hits == 0
@@ -1779,7 +1837,7 @@ class ProcessSource(Source):
         pid = info["pid"]
         with self.lock:
             end = self.ended.get(pid)
-            if end is not None and end >= info["ctime"] - 1.0:
+            if self.etw_hits and end is not None and end >= info["ctime"] - 1.0:
                 return
             self.ended[pid] = when
         lived = when - info["ctime"] if info["ctime"] else None
@@ -2430,7 +2488,7 @@ TIME_OF_DAY_RE = re.compile(r"(\d{1,2}):(\d{2}):(\d{2})(?:[.,](\d+))?\s*([AaPp])
 
 
 def find_procmon():
-    folders = [program_dir(), DESKTOP, os.getcwd(), "C:\\Tools", "C:\\Sysinternals", "C:\\SysinternalsSuite"]
+    folders = [PROGRAM_DIR, DESKTOP, os.getcwd(), "C:\\Tools", "C:\\Sysinternals", "C:\\SysinternalsSuite"]
     folders += [path for path in os.environ.get("PATH", "").split(os.pathsep) if path]
     for folder in folders:
         for name in PROCMON_NAMES:
@@ -2830,6 +2888,11 @@ ETW_GUID_NAMES = {guid.upper(): name for name, guid, _kernel in ETW_RAW_PROVIDER
 ETW_WRITE_MARKS = ("setvalue", "deletevalue", "deletekey", "createkey", "renamekey", "setkeysecurity", "writefile",
                    "setinformation", "setdisposition", "setrename", "deletefile", "setsecurity")
 ETW_SKIP_KEYS = frozenset(("EventHeader", "Descriptor", "ProviderId", "ProviderName", "Provider Name", "Task Name"))
+DENIED_RE = re.compile(r"denied|0x(?:80070005|80070522|c0000022)\b", re.I)
+
+
+def says_denied(text):
+    return DENIED_RE.search(text) is not None
 
 
 class EtwRawSource(Source):
@@ -2838,7 +2901,6 @@ class EtwRawSource(Source):
 
     def start(self):
         self.job = None
-        self.count = 0
         self.own_pid = os.getpid()
         if not IS_WIN:
             self.status("off", "Windows only")
@@ -2912,7 +2974,7 @@ class EtwRawSource(Source):
                     parts.append("%s=%s" % (key, text))
             detail = " | ".join(parts)
             blob = (str(provider) + " " + detail).lower()
-            denied = "denied" in blob or "0x8007" in blob or "0xc0000022" in blob
+            denied = says_denied(blob)
             write = any(mark in blob for mark in ETW_WRITE_MARKS)
             level = ERROR if denied else (CHANGE if write else INFO)
             label = provider or "ETW"
@@ -2922,8 +2984,7 @@ class EtwRawSource(Source):
             if detail:
                 body += "\n" + detail
             self.emit(kind, one_line("[%s] %s" % (label, detail or ("event %s" % event_id)), 600), level,
-                      pid=pid or None, detail=body, ts=ts)
-            self.count += 1
+                      pid=pid or None, proc=PROCESS_NAMES.get(pid), detail=body, ts=ts)
         except Exception:
             pass
 
@@ -3391,6 +3452,16 @@ class ProbeSource(Source):
 TRACE_PROVIDER_LINE = "{%s} 0xffffffffffffffff 5"
 
 
+def trace_row_time(row):
+    for key, value in row.items():
+        if (key or "").strip().lower() == "clock-time":
+            number = as_int(value)
+            if number is not None and number > FILETIME_EPOCH:
+                return filetime_to_epoch(number)
+            return None
+    return None
+
+
 class TraceToolSource(Source):
     name = SRC_TRACE
     logman_session = "BastardTrace"
@@ -3498,22 +3569,29 @@ class TraceToolSource(Source):
     def _publish(self, csv_path):
         listed = 0
         total = 0
+        times = []
         try:
             for row in procmon_csv_rows(csv_path):
                 total += 1
                 line = " | ".join("%s=%s" % (k, v) for k, v in row.items() if v and str(v).strip())
-                low = line.lower()
-                denied = "denied" in low or "0x8007" in low
+                denied = says_denied(line)
                 listed += 1
                 if listed > PROCMON_ROW_LIMIT:
                     break
+                ts = trace_row_time(row)
+                if ts is not None:
+                    times.append(ts)
                 self.emit(KIND_ETW, one_line("%s: %s" % (self.mode, line), 600),
-                          ERROR if denied else INFO, detail=one_line(line, 2000))
+                          ERROR if denied else INFO, detail=one_line(line, 2000), ts=ts)
         except Exception as exc:
             self.note("the %s capture could not be read: %s" % (self.mode, one_line(exc, 160)), WARN)
             return
         self.note("%s listed %d of %s" % (self.mode, listed, plural(total, "row")), INFO,
                   "Capture file: %s" % self.etl)
+        for number, start in list(self.session.markers):
+            found = sum(1 for ts in times if start < ts <= start + MARKER_WINDOW)
+            self.hub.emit(SRC_SYSTEM, KIND_MARK, "Marker %d: Trace Tools listed %s in the %d seconds after it" % (
+                number, plural(found, "event"), MARKER_WINDOW), MARK, ts=start + MARKER_WINDOW + 0.001)
         self.status("done", "%d listed" % listed)
 
 SOURCE_TYPES = (RegistrySource, FilesSource, ProcessSource, WindowsSource, EtwRawSource, WmiSource, EventLogSource,
@@ -3561,6 +3639,9 @@ class Session:
         self.starter.start()
 
     def _start(self):
+        removed = tidy_trace_logs(os.path.dirname(self.log_path), TRACE_LOG_KEEP - 1)
+        if removed:
+            LOG.info("Removed %s: %s", plural(len(removed), "old trace log"), ", ".join(removed))
         rules = self.hub.exclusions
         self.writer = LogWriter(self.log_path, self.header(),
                                 rules.log_bytes() if rules is not None else 0)
@@ -3618,11 +3699,13 @@ class Session:
                     source.status("failed", one_line(exc, 60))
                     source.note("could not finish: %s" % one_line(exc, 200), ERROR, traceback.format_exc())
             if self.writer is not None and not self.abort_event.is_set():
-                events = list(self.writer.events)
-                for number, start in list(self.markers):
-                    if self.claim_marker(number):
-                        text, level, detail = marker_summary(number, start, events)
-                        self.hub.emit(SRC_SYSTEM, KIND_MARK, text, level, detail=detail, ts=start + MARKER_WINDOW)
+                due = [(number, start) for number, start in list(self.markers) if self.claim_marker(number)]
+                if due:
+                    self.writer.flush(30.0)
+                    events = list(self.writer.events)
+                for number, start in due:
+                    text, level, detail = marker_summary(number, start, events)
+                    self.hub.emit(SRC_SYSTEM, KIND_MARK, text, level, detail=detail, ts=start + MARKER_WINDOW)
             elapsed = (self.stopped_at or time.time()) - self.started
             self.hub.emit(SRC_SYSTEM, KIND_SYS, "Trace stopped after %s" % duration_text(elapsed), INFO,
                           detail="Log file: " + self.log_path)
@@ -3924,6 +4007,9 @@ class App:
         self.ui_state = None
         self.rebuild_job = None
         self.rebuild_due = 0.0
+        self.reload_job = None
+        self.shown = []
+        self.shown_times = []
         self.search_job = None
         self.match_count = 0
         self.view_count = 0
@@ -4147,14 +4233,14 @@ class App:
     def _match(self, ev):
         if ev.kind == KIND_MARK:
             return True
-        if self.rules is not None and self.rules.blocks(ev.source, ev.level, ev.text, ev.proc, ev.detail):
-            return False
         row = self.rows.get(ev.source)
         if row is not None and not row.on:
             return False
         if self.show_index == 1 and ev.level not in (CHANGE, WARN, ERROR):
             return False
         if self.show_index == 2 and ev.level not in (WARN, ERROR):
+            return False
+        if self.rules is not None and self.rules.blocks(ev.source, ev.level, ev.text, ev.proc, ev.detail, False):
             return False
         if self.terms:
             hay = ("%s %s %s %s %s" % (ev.text, ev.proc, ev.source, ev.kind, ev.detail)).lower()
@@ -4166,6 +4252,10 @@ class App:
     def _values(self, ev):
         return (clock(ev.ts), ev.source, ev.kind, ev.proc, ev.pid or "", shorten(ev.text, 600))
 
+    def _insert(self, index, ev):
+        self.tree.tk.call(str(self.tree), "insert", "", index, "-id", str(ev.seq), "-values", self._values(ev),
+                          "-tags", (ev.level,))
+
     def _following(self):
         if self.tree.selection():
             return False
@@ -4174,23 +4264,109 @@ class App:
         except tk.TclError:
             return True
 
-    def _append(self, events):
-        rows = [ev for ev in events if self._match(ev)]
+    def _order(self):
+        return SORT_KEYS[self.sort_column or "time"], bool(self.sort_column) and self.sort_down
+
+    def _anchor(self):
+        shown = self.shown
+        if not shown:
+            return ""
+        try:
+            first = self.tree.yview()[0]
+        except tk.TclError:
+            return ""
+        top = int(round(first * len(shown)))
+        for total in (len(shown) + 1, len(shown)):
+            if abs(first * total - round(first * total)) < 1e-6:
+                top = int(round(first * total))
+                break
+        if top <= 0 and not self.tree.selection():
+            return ""
+        top = min(top, len(shown) - 1)
+        return str(shown[len(shown) - 1 - top if self._order()[1] else top][-1])
+
+    def _merge(self, events):
+        rows = [ev for ev in events if ev.seq in self.store.by_seq and self._match(ev)]
         if not rows:
             return
-        follow = self._following()
-        for ev in rows:
-            self.tree.insert("", "end", iid=str(ev.seq), values=self._values(ev), tags=(ev.level,))
-        self.view_count += len(rows)
         self.match_count += len(rows)
-        if self.view_count > VIEW_LIMIT + VIEW_LIMIT // 10:
-            children = self.tree.get_children()
-            extra = len(children) - VIEW_LIMIT
-            if extra > 0:
-                self.tree.delete(*children[:extra])
-            self.view_count = len(children) - max(0, extra)
+        old = self.shown_times
+        times = old + sorted(ev.key() for ev in rows)
+        times.sort()
+        gone = []
+        if len(times) > VIEW_LIMIT:
+            floor = times[-VIEW_LIMIT]
+            times = times[-VIEW_LIMIT:]
+            gone = old[:bisect.bisect_left(old, floor)]
+            rows = [ev for ev in rows if ev.key() >= floor]
+        self.shown_times = times
+        self.view_count = len(times)
+        if self.reload_job is not None or not (rows or gone):
+            return
+        key = self._order()[0]
+        rows.sort(key=key)
+        if len(rows) > MERGE_LIMIT and self.shown and key(rows[0]) < self.shown[-1]:
+            self.reload_job = self.root.after(RELOAD_DELAY, self._reload)
+            return
+        self._apply(rows, gone)
+
+    def _apply(self, rows, gone):
+        follow = self._following()
+        anchor = "" if follow else self._anchor()
+        key, down = self._order()
+        shown = self.shown
+        if gone:
+            seqs = set(seq for _ts, seq in gone)
+            self.tree.delete(*[str(seq) for seq in seqs])
+            self.shown = shown = [value for value in shown if value[-1] not in seqs]
+        for ev in rows:
+            value = key(ev)
+            index = bisect.bisect_left(shown, value)
+            shown.insert(index, value)
+            place = len(shown) - 1 - index if down else index
+            self._insert("end" if place == len(shown) - 1 else place, ev)
         if follow:
             self.tree.yview_moveto(1.0)
+        elif anchor and self.tree.exists(anchor):
+            self.tree.yview(self.tree.index(anchor))
+
+    def _reload(self, anchor=True):
+        self.reload_job = None
+        selected = self.tree.selection()
+        follow = self._following()
+        top = self._anchor() if anchor and not follow and not selected else ""
+        key, down = self._order()
+        pairs = sorted(((key(ev), ev) for ev in (self.store.by_seq[seq] for _ts, seq in self.shown_times)),
+                       key=lambda pair: pair[0])
+        children = self.tree.get_children()
+        if children:
+            self.tree.delete(*children)
+        for _value, ev in (reversed(pairs) if down else pairs):
+            self._insert("end", ev)
+        self.shown = [value for value, _ev in pairs]
+        keep = [iid for iid in selected if self.tree.exists(iid)]
+        if keep:
+            self.tree.selection_set(keep)
+            self.tree.see(keep[0])
+        elif follow:
+            self.tree.yview_moveto(1.0)
+        elif top and self.tree.exists(top):
+            self.tree.yview(self.tree.index(top))
+
+    def _reset_view(self):
+        for job in (self.rebuild_job, self.reload_job):
+            if job is not None:
+                self.root.after_cancel(job)
+        self.rebuild_job = None
+        self.reload_job = None
+        children = self.tree.get_children()
+        if children:
+            self.tree.delete(*children)
+        self.store.clear()
+        self.shown = []
+        self.shown_times = []
+        self.match_count = 0
+        self.view_count = 0
 
     def _schedule_rebuild(self, delay):
         now = time.time()
@@ -4220,30 +4396,21 @@ class App:
         self._paint_headings()
         if self.rebuild_job is not None:
             self.root.after_cancel(self.rebuild_job)
-            self.rebuild_job = None
-        self._rebuild()
+            self._rebuild(False)
+            return
+        if self.reload_job is not None:
+            self.root.after_cancel(self.reload_job)
+        self._reload(False)
 
-    def _rebuild(self):
+    def _rebuild(self, anchor=True):
         self.rebuild_job = None
-        selected = self.tree.selection()
-        follow = self._following()
         matches = [ev for ev in self.store.events() if self._match(ev)]
         self.match_count = len(matches)
-        rows = matches[-VIEW_LIMIT:]
-        if self.sort_column:
-            rows = sorted(rows, key=SORT_KEYS[self.sort_column], reverse=self.sort_down)
-        children = self.tree.get_children()
-        if children:
-            self.tree.delete(*children)
-        for ev in rows:
-            self.tree.insert("", "end", iid=str(ev.seq), values=self._values(ev), tags=(ev.level,))
-        self.view_count = len(rows)
-        keep = [iid for iid in selected if self.tree.exists(iid)]
-        if keep:
-            self.tree.selection_set(keep)
-            self.tree.see(keep[0])
-        elif follow:
-            self.tree.yview_moveto(1.0)
+        self.shown_times = [ev.key() for ev in matches[-VIEW_LIMIT:]]
+        self.view_count = len(self.shown_times)
+        if self.reload_job is not None:
+            self.root.after_cancel(self.reload_job)
+        self._reload(anchor)
 
     def _drain(self):
         batch = []
@@ -4253,10 +4420,9 @@ class App:
         except queue.Empty:
             pass
         if batch:
-            if self.store.add(batch) and self.rebuild_job is None and not self.sort_column:
-                self._append(batch)
-            else:
-                self._schedule_rebuild(400)
+            self.store.add(batch)
+            if self.rebuild_job is None:
+                self._merge(batch)
         return len(batch)
 
     def _tick(self):
@@ -4352,12 +4518,7 @@ class App:
                 self.hub.ui.get_nowait()
         except queue.Empty:
             pass
-        self.store.clear()
-        children = self.tree.get_children()
-        if children:
-            self.tree.delete(*children)
-        self.view_count = 0
-        self.match_count = 0
+        self._reset_view()
         self.marker_count = 0
         self._show_detail(DETAIL_HINT)
         self.hub.reset(SOURCE_NAMES)
@@ -4478,15 +4639,7 @@ class App:
             self.menu.grab_release()
 
     def clear_timeline(self):
-        if self.rebuild_job is not None:
-            self.root.after_cancel(self.rebuild_job)
-            self.rebuild_job = None
-        children = self.tree.get_children()
-        if children:
-            self.tree.delete(*children)
-        self.store.clear()
-        self.match_count = 0
-        self.view_count = 0
+        self._reset_view()
         self._show_detail("")
         self.flash("The list is cleared, the log on disk still holds everything")
 
@@ -4520,11 +4673,14 @@ class App:
             self.flash("That rule is already in the filter")
             return
         self.rules.set_lines(list(self.rules.lines) + [line])
-        self.rules.enabled = True
         error = save_exclusions(self.rules)
-        self._schedule_rebuild(1)
+        if self.rules.enabled:
+            self._schedule_rebuild(1)
         if error:
             self.flash("The rules could not be saved: " + one_line(error, 120))
+        elif not self.rules.enabled:
+            self.flash("Added to the filter, but Use these rules is off in Filter, so it leaves nothing out yet: "
+                       + one_line(line, 120))
         else:
             self.flash("Left out from now on: " + one_line(line, 150))
 
@@ -4717,6 +4873,9 @@ class App:
         if self.rebuild_job is not None:
             self.root.after_cancel(self.rebuild_job)
             self._rebuild()
+        elif self.reload_job is not None:
+            self.root.after_cancel(self.reload_job)
+            self._reload()
         session = self.session
         status, counts = self.hub.snapshot()
         log_text = ""

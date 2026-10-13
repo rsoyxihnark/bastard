@@ -1,5 +1,22 @@
 # Changelog
 
+## 1.7.1
+
+- Bastard 1.7.1 keeps the event list quick while sorted or after Stop, names the process behind ETW rows and tidies old trace logs.
+- Fixed the event list freezing for a second or more at a time while sorted by a column, or while ProcMon rows arrived after Stop.
+- The event list stays on the rows you scrolled to while new rows arrive above them.
+- Fixed ETW and Trace Tools marking a missing file and other ordinary errors as a Problem, as if access had been denied.
+- Fixed lines starting with # or ; disappearing from the Filter window the next time Bastard started.
+- Fixed the count of events left out by the filter going up every time the list redrew, and carrying over into the next trace.
+- Fixed the status line counts of events left out by the filter or arriving after the trace had ended sometimes coming out low.
+- ETW rows now name the process behind them, so the Process column shows it and Leave this process out works on them.
+- Fixed Trace Tools rows landing at the end of the list instead of at the time they happened.
+- After Stop, each Marker also says how many Trace Tools rows fall in the 6 seconds after it, as it already does for ProcMon.
+- Fixed Leave this match out and Leave this process out turning every filter rule back on when Use these rules was off.
+- Bastard now keeps the five newest trace logs next to itself and deletes the older ones.
+- Fixed Processes missing a program that started with the PID of one that had just closed, when Bastard was not run as administrator.
+- Fixed the Marker summary written at Stop missing the last events of the trace.
+
 ## 1.7.0
 
 - Bastard 1.7.0 hides a source with a click in the panel on the left, and the two filter rows above the list are gone.
