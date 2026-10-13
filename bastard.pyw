@@ -25,7 +25,7 @@ import tkinter as tk
 import tkinter.font as tkfont
 from tkinter import filedialog, messagebox, ttk
 
-VERSION = "1.7.1"
+VERSION = "1.8.0"
 
 APP_NAME = "Bastard"
 IS_WIN = os.name == "nt"
@@ -390,7 +390,7 @@ def as_int(value, default=None):
     except ValueError:
         try:
             return int(float(text))
-        except ValueError:
+        except (ValueError, OverflowError):
             return default
 
 
@@ -473,9 +473,10 @@ def nice_reg_path(path, user_sid):
     if low.startswith("\\registry\\user\\"):
         rest = path[15:]
         sid = (user_sid or "").lower()
-        if sid and rest.lower().startswith(sid + "_classes"):
+        low_rest = rest.lower()
+        if sid and low_rest.startswith(sid + "_classes") and low_rest[len(sid) + 8:len(sid) + 9] in ("", "\\"):
             return "HKCU\\Software\\Classes" + rest[len(sid) + 8:]
-        if sid and rest.lower().startswith(sid):
+        if sid and low_rest.startswith(sid) and low_rest[len(sid):len(sid) + 1] in ("", "\\"):
             return "HKCU" + rest[len(sid):]
         return "HKU\\" + rest
     return path
@@ -587,26 +588,50 @@ PROCESS_NAMES = ProcessNames()
 class OwnTree:
     def __init__(self, root):
         self.lock = threading.Lock()
-        self.pids = {root}
+        self.root = root
+        self.spans = {}
 
     def reset(self, root):
         with self.lock:
-            self.pids = {root}
+            self.root = root
+            self.spans = {}
 
-    def note(self, pid, ppid):
+    def note(self, pid, ppid, ts=None, name=""):
         if not pid or not ppid:
-            return
+            return pid == self.root
         with self.lock:
-            if ppid in self.pids:
-                self.pids.add(pid)
+            if pid == self.root or self._holds(ppid, ts, ""):
+                self.spans.setdefault(pid, []).append([ts, None, (name or "").lower()])
+                return True
+        return False
 
-    def holds(self, pid):
+    def gone(self, pid, ts=None):
+        with self.lock:
+            for span in self.spans.get(pid, ()):
+                if span[1] is None:
+                    span[1] = ts if ts is not None else time.time()
+
+    def holds(self, pid, ts=None, name=""):
         if not pid:
             return False
         with self.lock:
-            return pid in self.pids
+            return self._holds(pid, ts, (name or "").lower())
+
+    def _holds(self, pid, ts, name):
+        if pid == self.root:
+            return True
+        for start, end, known in self.spans.get(pid, ()):
+            if name and known and name != known:
+                continue
+            if ts is None:
+                if end is None:
+                    return True
+            elif (start is None or ts >= start - OWN_SLACK) and (end is None or ts <= end + OWN_SLACK):
+                return True
+        return False
 
 
+OWN_SLACK = 0.5
 OWN_TREE = OwnTree(os.getpid())
 
 
@@ -935,6 +960,7 @@ DEFAULT_EXCLUSIONS = (
     "ETW | info | Kernel-File",
     "ProcMon | | chrome.exe",
     "| | Bastard",
+    "ETW | info | Kernel-Registry",
 )
 EXCLUSION_HELP = (
     "One rule per line: source | level | the text it holds | the text that keeps it",
@@ -943,6 +969,7 @@ EXCLUSION_HELP = (
     "Sources: Registry Files Processes Windows Event Log ProcMon Wallpaper ETW WMI Probes Trace Tools",
     "Levels: info change warn error marker. System events are never left out.",
     "Delete every line to leave nothing out. An empty list stays empty.",
+    "A third part written as process=name matches the rows of that process alone.",
 )
 
 
@@ -1037,7 +1064,11 @@ class Exclusions:
                 continue
             if low is None:
                 low = " ".join(part for part in (proc, text, detail) if part).lower()
-            if holds and holds not in low:
+            if holds.startswith("process="):
+                wanted = holds[8:].strip()
+                if not wanted or (proc or "").strip().lower() != wanted:
+                    continue
+            elif holds and holds not in low:
                 continue
             if keeps and keeps in low:
                 continue
@@ -1115,16 +1146,16 @@ def process_exclusion_from(ev):
     name = (ev.proc or "").strip()
     if not name:
         return ""
-    return "%s | | %s" % (ev.source, name[:160])
+    return "%s | | process=%s" % (ev.source, name)
 
 
 def exclusion_from(ev):
     text = ev.text or ""
     match = re.search(r"0x[0-9A-Fa-f]+|\d{3,}", text)
     body = text[:match.start()] if match else text
-    body = body.rstrip(" =|:,;-\t")
+    body = body.split("|", 1)[0].rstrip(" =|:,;-\t")
     if not body:
-        body = text[:60]
+        body = text.split("|", 1)[0][:60]
     return "%s | %s | %s" % (ev.source, ev.level, body[:160])
 
 
@@ -1874,8 +1905,7 @@ class ProcessSource(Source):
         self._emit_exit(pid, name, code, lived, ts)
 
     def _emit_start(self, pid, ppid, name, path, ts, package):
-        OWN_TREE.note(pid, ppid)
-        if OWN_TREE.holds(pid):
+        if OWN_TREE.note(pid, ppid, ts, name):
             return
         cmd = ""
         if psutil is not None:
@@ -1902,7 +1932,8 @@ class ProcessSource(Source):
         self.emit(KIND_PROC, text, INFO, pid=pid, proc=name, detail="\n".join(detail), ts=ts)
 
     def _emit_exit(self, pid, name, code, lived, ts):
-        if OWN_TREE.holds(pid):
+        if OWN_TREE.holds(pid, ts, name):
+            OWN_TREE.gone(pid, ts)
             return
         text = "Exited " + process_label(name, pid)
         level = INFO
@@ -2484,7 +2515,27 @@ PROCMON_FILE_WRITES = frozenset(("WriteFile", "SetDispositionInformationFile", "
 PROCMON_PROCESS_OPS = frozenset(("Process Create", "Process Exit", "Process Start", "Thread Create", "Thread Exit",
                                  "Load Image", "Process Statistics", "Process Profiling", "Thread Profiling"))
 PROCMON_KEEP = 5
+CAPTURE_RE = re.compile(r"^Bastard_(?:[a-z]+_)?(\d{8}_\d{6})", re.I)
+CAPTURE_SUFFIXES = (".pml", ".csv", ".etl", ".txt")
 TIME_OF_DAY_RE = re.compile(r"(\d{1,2}):(\d{2}):(\d{2})(?:[.,](\d+))?\s*([AaPp])?")
+
+
+def tidy_captures(current):
+    try:
+        names = os.listdir(TRACE_DIR)
+    except OSError:
+        return
+    groups = {}
+    for name in names:
+        match = CAPTURE_RE.match(name)
+        if match and match.group(1) != current and name.lower().endswith(CAPTURE_SUFFIXES):
+            groups.setdefault(match.group(1), []).append(name)
+    for stamp in sorted(groups)[:max(0, len(groups) - (PROCMON_KEEP - 1))]:
+        for name in groups[stamp]:
+            try:
+                os.remove(os.path.join(TRACE_DIR, name))
+            except OSError:
+                pass
 
 
 def find_procmon():
@@ -2526,7 +2577,7 @@ class ProcmonDigest:
 
     def add(self, ts, proc, pid, operation, path, result):
         self.total += 1
-        if pid == self.own_pid or OWN_TREE.holds(pid):
+        if pid == self.own_pid or OWN_TREE.holds(pid, ts, proc):
             self.ours += 1
             return
         name = (proc or "").lower()
@@ -2614,7 +2665,8 @@ class ProcMonSource(Source):
         if not self.exe:
             self.status("off", "Procmon64.exe not found")
             self.note("put Procmon64.exe next to Bastard to record a ProcMon capture", INFO,
-                      "Bastard looks next to itself, on the Desktop, in C:\\Tools, C:\\Sysinternals and on the PATH.")
+                      "Bastard looks next to itself, on the Desktop, in the current folder, in C:\\Tools, "
+                      "C:\\Sysinternals and C:\\SysinternalsSuite, and on the PATH.")
             return
         if not self.session.admin:
             self.status("off", "needs administrator")
@@ -2623,22 +2675,9 @@ class ProcMonSource(Source):
         self.status("starting", "launching")
         self.spawn(self._launch, "launch")
 
-    def _tidy(self):
-        try:
-            names = [n for n in os.listdir(TRACE_DIR) if n.startswith("Bastard_") and n.lower().endswith((".pml", ".csv"))]
-        except OSError:
-            return
-        stems = sorted({os.path.splitext(n)[0] for n in names})
-        for stem in stems[: max(0, len(stems) - (PROCMON_KEEP - 1))]:
-            for ext in (".pml", ".csv"):
-                try:
-                    os.remove(os.path.join(TRACE_DIR, stem + ext))
-                except OSError:
-                    pass
-
     def _launch(self):
         os.makedirs(TRACE_DIR, exist_ok=True)
-        self._tidy()
+        tidy_captures(self.session.stamp_text)
         self.pml = os.path.join(TRACE_DIR, "Bastard_%s.pml" % self.session.stamp_text)
         self.launched = time.time()
         if self.stopping():
@@ -2718,6 +2757,8 @@ class ProcMonSource(Source):
                 if total <= 0:
                     return False, "the capture holds no events"
                 last = 0.0
+                bad = 0
+                good = 0
                 for index in range(total):
                     if index % 2000 == 0:
                         if self.session.abort_event.is_set():
@@ -2728,15 +2769,26 @@ class ProcMonSource(Source):
                         digest.total += left
                         digest.over += left
                         return True, "stopped at %s of %s" % (plural(index, "event"), plural(total, "event"))
-                    ev = reader[index]
-                    group = ev.event_class.name
-                    if group == "Profiling":
-                        digest.total += 1
-                        continue
-                    operation = getattr(ev.operation, "csv_name", None) or ev.operation.name
-                    result = procmon_result_text(ev.result) if procmon_result_text else str(ev.result)
-                    digest.add(filetime_to_epoch(ev.date_filetime), ev.process.process_name, ev.process.pid,
+                    try:
+                        ev = reader[index]
+                        if ev.event_class.name == "Profiling":
+                            digest.total += 1
+                            continue
+                        operation = getattr(ev.operation, "csv_name", None) or ev.operation.name
+                        result = procmon_result_text(ev.result) if procmon_result_text else str(ev.result)
+                        row = (filetime_to_epoch(ev.date_filetime), ev.process.process_name, ev.process.pid,
                                operation, self._fix_path(ev.path or ""), result)
+                    except Exception:
+                        bad += 1
+                        if bad == 1:
+                            LOG.exception("ProcMon event %d could not be read", index)
+                        continue
+                    good += 1
+                    digest.add(*row)
+            if bad and not good:
+                return False, "no event could be read"
+            if bad:
+                return True, "%s, %d could not be read" % (plural(total, "event"), bad)
             return True, plural(total, "event")
         except Exception as exc:
             LOG.exception("ProcMon capture could not be read")
@@ -2792,26 +2844,29 @@ class ProcMonSource(Source):
 
     def _publish(self, digest, info):
         rows = digest.ordered()
+        shown = []
         for ts, proc, pid, operation, path, result, kind, level in rows:
             text = "%s %s" % (operation, path) if path else operation
             if result and result != "SUCCESS":
                 text += ": " + result
             detail = ["Operation: " + operation, "Path: " + (path or "(none)"), "Result: " + result,
                       "Process: %s (PID %s)" % (proc, pid)]
-            self.emit(kind, one_line(text, 600), level, pid=pid, proc=proc, detail="\n".join(detail), ts=ts)
-        summary = "read %s, listed %d: %d denied, %d registry writes, %d file writes, %d scope reads" % (
-            plural(digest.total, "event"), len(rows), digest.denied, digest.reg_writes, digest.file_writes,
-            digest.reads)
+            if self.emit(kind, one_line(text, 600), level, pid=pid, proc=proc, detail="\n".join(detail),
+                         ts=ts) is not None:
+                shown.append(ts)
+        summary = "read %s, listed %d of %d: %d denied, %d registry writes, %d file writes, %d reads" % (
+            plural(digest.total, "event"), len(shown), len(rows), digest.denied, digest.reg_writes,
+            digest.file_writes, digest.reads)
         if digest.over:
             summary += ", %d more not listed" % digest.over
         if digest.ours:
             summary += ", %d of our own left out" % digest.ours
         self.note(summary, INFO, "Capture file: %s\nRead: %s" % (self.pml, info))
         for number, start in list(self.session.markers):
-            found = sum(1 for row in rows if start < row[0] <= start + MARKER_WINDOW)
+            found = sum(1 for ts in shown if start < ts <= start + MARKER_WINDOW)
             self.hub.emit(SRC_SYSTEM, KIND_MARK, "Marker %d: ProcMon listed %s in the %d seconds after it" % (
                 number, plural(found, "event"), MARKER_WINDOW), MARK, ts=start + MARKER_WINDOW + 0.001)
-        self.status("done", "%d listed" % len(rows))
+        self.status("done", "%d listed" % len(shown))
 
 
 def current_wallpaper():
@@ -2878,9 +2933,12 @@ def run_text(cmd, timeout):
 
 
 ETW_RAW_PROVIDERS = (
+    ("Kernel-Registry", "{70EB4F03-C1DE-4F73-A051-33D13D5413BD}", True),
     ("Kernel-Registry", "{70EB4F03-C1DE-4F73-A051-33D13D541355}", True),
     ("Kernel-File", "{EDD08927-9CC4-4E65-B970-C2560FB5C289}", True),
+    ("Shell-Core", "{30336ED4-E327-447C-9DE0-51B652C86108}", False),
     ("Shell-Core", "{30336ED4-E327-447C-9DE0-51B2E6059F02}", False),
+    ("Immersive-Shell", "{315A8872-923E-4EA2-9889-33CD4754BF64}", False),
     ("Immersive-Shell", "{BC2C92D8-8DB4-4F8B-8D29-8F3A3A0BF1A4}", False),
     ("Themes", "{7B67BEC2-6E2F-4A68-B7E4-9D3E9A4C4C8F}", False),
 )
@@ -2888,6 +2946,12 @@ ETW_GUID_NAMES = {guid.upper(): name for name, guid, _kernel in ETW_RAW_PROVIDER
 ETW_WRITE_MARKS = ("setvalue", "deletevalue", "deletekey", "createkey", "renamekey", "setkeysecurity", "writefile",
                    "setinformation", "setdisposition", "setrename", "deletefile", "setsecurity")
 ETW_SKIP_KEYS = frozenset(("EventHeader", "Descriptor", "ProviderId", "ProviderName", "Provider Name", "Task Name"))
+ETW_NAME_FIELDS = frozenset(("filename", "filepath", "keyname", "valuename", "relativename"))
+ETW_REGISTRY_WRITES = frozenset((3, 5, 6, 11, 15))
+ETW_FILE_REPLACES = frozenset((0, 4, 5))
+ETW_WRITE_TASKS = frozenset(("write", "setinformation", "setdelete", "rename", "renamepath", "deletepath", "setlinkpath",
+                             "createnewfile", "setsecurity", "setea", "createkey", "deletekey", "setvaluekey",
+                             "deletevaluekey", "setinformationkey", "setsecuritykey", "renamekey"))
 DENIED_RE = re.compile(r"denied|0x(?:80070005|80070522|c0000022)\b", re.I)
 
 
@@ -2898,9 +2962,11 @@ def says_denied(text):
 class EtwRawSource(Source):
     name = SRC_ETW
     session_name = "Bastard ETW Trace"
+    job = None
 
     def start(self):
         self.job = None
+        self.failures = 0
         self.own_pid = os.getpid()
         if not IS_WIN:
             self.status("off", "Windows only")
@@ -2920,7 +2986,8 @@ class EtwRawSource(Source):
                 continue
             try:
                 providers.append(etw_core.ProviderInfo(pname, EtwGuid(guid), 5, 0xffffffffffffffff))
-                used.append(pname)
+                if pname not in used:
+                    used.append(pname)
             except Exception as exc:
                 self.note("provider %s is not available: %s" % (pname, one_line(exc, 120)), WARN)
         return providers, used
@@ -2960,7 +3027,7 @@ class EtwRawSource(Source):
             if abs(ts - time.time()) > 86400:
                 ts = time.time()
             pid = as_int(header.get("ProcessId"), 0) or as_int(data.get("ProcessId"), 0)
-            if pid and pid == self.own_pid:
+            if pid and (pid == self.own_pid or OWN_TREE.holds(pid, ts)):
                 return
             provider = data.get("ProviderName") or data.get("Provider Name") or ""
             if not provider:
@@ -2974,8 +3041,18 @@ class EtwRawSource(Source):
                     parts.append("%s=%s" % (key, text))
             detail = " | ".join(parts)
             blob = (str(provider) + " " + detail).lower()
+            task = str(data.get("Task Name") or "").strip().lower()
             denied = says_denied(blob)
-            write = any(mark in blob for mark in ETW_WRITE_MARKS)
+            named = any(str(key).lower() in ETW_NAME_FIELDS and str(value or "").strip() for key, value in data.items())
+            number = as_int(event_id, 0)
+            if provider == "Kernel-Registry":
+                write = number in ETW_REGISTRY_WRITES or (number == 1 and as_int(data.get("Disposition"), 0) == 1)
+            elif task == "create":
+                write = named and (as_int(data.get("CreateOptions"), 0) >> 24) in ETW_FILE_REPLACES
+            elif task in ETW_WRITE_TASKS:
+                write = named
+            else:
+                write = any(mark in blob for mark in ETW_WRITE_MARKS)
             level = ERROR if denied else (CHANGE if write else INFO)
             label = provider or "ETW"
             low = label.lower()
@@ -2986,7 +3063,9 @@ class EtwRawSource(Source):
             self.emit(kind, one_line("[%s] %s" % (label, detail or ("event %s" % event_id)), 600), level,
                       pid=pid or None, proc=PROCESS_NAMES.get(pid), detail=body, ts=ts)
         except Exception:
-            pass
+            self.failures += 1
+            if self.failures <= 5:
+                LOG.exception("ETW event could not be read")
 
     def _stop_session(self):
         try:
@@ -3018,6 +3097,14 @@ WMI_REG_TARGETS = (
     ("HKEY_CURRENT_USER", "Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Wallpapers", "BackgroundType"),
     ("HKEY_CURRENT_USER", "Software\\Microsoft\\Windows\\CurrentVersion\\Themes", "CurrentTheme"),
 )
+
+
+def wmi_reg_target(hive, path, sid):
+    if hive == "HKEY_CURRENT_USER":
+        if not sid:
+            return None
+        hive, path = "HKEY_USERS", sid + "\\" + path
+    return hive, path.replace("\\", "\\\\")
 
 
 class WmiSource(Source):
@@ -3076,12 +3163,15 @@ class WmiSource(Source):
     def _reg_watch(self):
         pythoncom.CoInitialize()
         try:
-            conn = wmi_module.WMI()
+            conn = wmi_module.WMI(namespace="default")
             watchers = []
             for hive, path, name in WMI_REG_TARGETS:
+                target = wmi_reg_target(hive, path, self.session.user_sid)
+                if target is None:
+                    continue
                 try:
-                    watchers.append((conn.RegistryValueChangeEvent.watch_for(Hive=hive, KeyPath=path, ValueName=name),
-                                     hive, path, name))
+                    watchers.append((conn.RegistryValueChangeEvent.watch_for(Hive=target[0], KeyPath=target[1],
+                                                                             ValueName=name), hive, path, name))
                 except Exception:
                     pass
             if not watchers:
@@ -3465,11 +3555,14 @@ def trace_row_time(row):
 class TraceToolSource(Source):
     name = SRC_TRACE
     logman_session = "BastardTrace"
+    started_ok = False
+    stopped = False
 
     def start(self):
         self.mode = ""
         self.etl = ""
         self.started_ok = False
+        self.stopped = False
         if not IS_WIN:
             self.status("off", "Windows only")
             return
@@ -3500,6 +3593,7 @@ class TraceToolSource(Source):
         if self._leave_it_to_etw():
             return
         os.makedirs(TRACE_DIR, exist_ok=True)
+        tidy_captures(self.session.stamp_text)
         if self._start_logman() or self._start_wpr():
             self.started_ok = True
             self.status("running", "%s capturing" % self.mode)
@@ -3545,11 +3639,16 @@ class TraceToolSource(Source):
         elif self.mode == "WPR":
             run_text(["wpr", "-stop", self.etl], 90)
 
+    def stop(self):
+        if self.started_ok and not self.stopped:
+            self.stopped = True
+            self.status("finishing", "stopping %s" % self.mode)
+            self._stop_capture()
+
     def finish(self):
         if not self.started_ok:
             return
-        self.status("finishing", "stopping %s" % self.mode)
-        self._stop_capture()
+        self.stop()
         if self.session.abort_event.is_set():
             return
         if not self.etl or not os.path.isfile(self.etl):
@@ -3569,25 +3668,29 @@ class TraceToolSource(Source):
     def _publish(self, csv_path):
         listed = 0
         total = 0
+        more = False
         times = []
         try:
             for row in procmon_csv_rows(csv_path):
+                if total >= PROCMON_ROW_LIMIT:
+                    more = True
+                    break
                 total += 1
                 line = " | ".join("%s=%s" % (k, v) for k, v in row.items() if v and str(v).strip())
                 denied = says_denied(line)
-                listed += 1
-                if listed > PROCMON_ROW_LIMIT:
-                    break
                 ts = trace_row_time(row)
-                if ts is not None:
-                    times.append(ts)
-                self.emit(KIND_ETW, one_line("%s: %s" % (self.mode, line), 600),
-                          ERROR if denied else INFO, detail=one_line(line, 2000), ts=ts)
+                if self.emit(KIND_ETW, one_line("%s: %s" % (self.mode, line), 600),
+                             ERROR if denied else INFO, detail=one_line(line, 2000), ts=ts) is not None:
+                    listed += 1
+                    if ts is not None:
+                        times.append(ts)
         except Exception as exc:
             self.note("the %s capture could not be read: %s" % (self.mode, one_line(exc, 160)), WARN)
             return
-        self.note("%s listed %d of %s" % (self.mode, listed, plural(total, "row")), INFO,
-                  "Capture file: %s" % self.etl)
+        note = "%s listed %d of %s" % (self.mode, listed, plural(total, "row"))
+        if more:
+            note += ", and the capture holds more"
+        self.note(note, INFO, "Capture file: %s" % self.etl)
         for number, start in list(self.session.markers):
             found = sum(1 for ts in times if start < ts <= start + MARKER_WINDOW)
             self.hub.emit(SRC_SYSTEM, KIND_MARK, "Marker %d: Trace Tools listed %s in the %d seconds after it" % (
@@ -3653,8 +3756,8 @@ class Session:
             self.hub.emit(SRC_SYSTEM, KIND_SYS, "The trace log could not be written: %s" % one_line(self.writer.error, 200),
                           ERROR, detail=self.log_path)
         if IS_WIN and not self.admin:
-            self.hub.emit(SRC_SYSTEM, KIND_SYS, "Not running as administrator, so ProcMon and short-lived processes are off",
-                          WARN)
+            self.hub.emit(SRC_SYSTEM, KIND_SYS, "Not running as administrator, so ProcMon, short-lived processes, "
+                          "the kernel ETW providers and Trace Tools are off", WARN)
         for source in self.sources:
             if self.stop_event.is_set():
                 break
@@ -3699,13 +3802,14 @@ class Session:
                     source.status("failed", one_line(exc, 60))
                     source.note("could not finish: %s" % one_line(exc, 200), ERROR, traceback.format_exc())
             if self.writer is not None and not self.abort_event.is_set():
-                due = [(number, start) for number, start in list(self.markers) if self.claim_marker(number)]
-                if due:
+                if self.markers and not self.writer.capped:
                     self.writer.flush(30.0)
-                    events = list(self.writer.events)
-                for number, start in due:
-                    text, level, detail = marker_summary(number, start, events)
-                    self.hub.emit(SRC_SYSTEM, KIND_MARK, text, level, detail=detail, ts=start + MARKER_WINDOW)
+                if not self.writer.capped:
+                    due = [(number, start) for number, start in list(self.markers) if self.claim_marker(number)]
+                    events = list(self.writer.events) if due else []
+                    for number, start in due:
+                        text, level, detail = marker_summary(number, start, events)
+                        self.hub.emit(SRC_SYSTEM, KIND_MARK, text, level, detail=detail, ts=start + MARKER_WINDOW)
             elapsed = (self.stopped_at or time.time()) - self.started
             self.hub.emit(SRC_SYSTEM, KIND_SYS, "Trace stopped after %s" % duration_text(elapsed), INFO,
                           detail="Log file: " + self.log_path)
@@ -3869,7 +3973,10 @@ def geometry_fits(root, geometry):
     match = GEOMETRY_RE.match(geometry or "")
     if not match:
         return False
-    width, height, x, y = (int(match.group(i)) for i in range(1, 5))
+    try:
+        width, height, x, y = (int(match.group(i).lstrip("+")) for i in range(1, 5))
+    except ValueError:
+        return False
     left, top, span_x, span_y = screen_box(root)
     if width < 400 or height < 300:
         return False
@@ -3930,6 +4037,10 @@ class SourceRow(tk.Frame):
     def toggle(self, _event=None):
         self.on = not self.on
         self._paint()
+        if self.last is not None:
+            state, note, count = self.last
+            self.last = None
+            self.show(state, note, count)
         if self.command is not None:
             self.command()
 
@@ -3945,7 +4056,7 @@ class SourceRow(tk.Frame):
         self.led.set(STATE_COLORS.get(state, Theme.MUTE))
         self.count.configure(text=str(count) if count else "")
         text = note or STATE_WORDS.get(state, state)
-        self.info.configure(text=shorten(text if self.on else text + ", hidden", 36))
+        self.info.configure(text=shorten(text, 36) if self.on else shorten(text, 28) + ", hidden")
 
 
 def ask_admin(root, scale):
@@ -3963,8 +4074,8 @@ def ask_admin(root, scale):
         choice["value"] = value
         window.destroy()
 
-    text = ("Bastard is not running as administrator.\n\nProcMon captures and short-lived processes need administrator "
-            "rights. Everything else works without them.")
+    text = ("Bastard is not running as administrator.\n\nProcMon captures, short-lived processes, the kernel ETW "
+            "providers and Trace Tools need administrator rights. Everything else works without them.")
     tk.Label(window, text=text, justify="left", wraplength=int(420 * scale), bg=Theme.PANEL, fg=Theme.FG,
              font=("Segoe UI", 10)).pack(padx=int(24 * scale), pady=(int(20 * scale), int(14 * scale)))
     buttons = tk.Frame(window, bg=Theme.PANEL)
@@ -4146,7 +4257,7 @@ class App:
             self.tree.column(column, width=self.px(TREE_WIDTHS[column]), minwidth=self.px(40),
                              anchor="e" if column == "pid" else "w", stretch=column == "event")
         saved_sort = self.settings.get("sort")
-        if saved_sort in SORT_KEYS:
+        if isinstance(saved_sort, str) and saved_sort in SORT_KEYS:
             self.sort_column = saved_sort
             self.sort_down = self.settings.get("sort_down") is True
         self._paint_headings()
@@ -4473,7 +4584,11 @@ class App:
             text = busy + ", " + text
         if self.match_count > self.view_count:
             text += ", the newest %d are listed" % self.view_count
-        if self.store.dropped:
+        writer = self.session.writer if self.session is not None else None
+        if self.store.dropped and writer is not None and writer.capped:
+            text += ", %d more did not fit in the timeline, and the log stopped at its %d MB limit" % (
+                self.store.dropped, writer.max_bytes // (1024 * 1024))
+        elif self.store.dropped:
             text += ", %d more are only in the log" % self.store.dropped
         if self.rules is not None and self.rules.blocked:
             text += ", %d left out by the filter" % self.rules.blocked
@@ -4902,6 +5017,8 @@ class App:
             "log_path": session.log_path, "log_exists": bool(log_text), "log_lines": len(times),
             "log_sorted": times == sorted(times), "pml_path": session.pml_path, "exports": exports,
             "listed": len(self.tree.get_children()), "matching": self.match_count,
+            "etw_test_key": any(ev.source == SRC_ETW and "traceselftest" in (ev.text + " " + ev.detail).lower()
+                                for ev in self.store.events()),
         }
         with open(self.options["selftest"], "w", encoding="utf-8") as fh:
             json.dump(result, fh, indent=1)

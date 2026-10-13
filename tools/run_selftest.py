@@ -169,6 +169,8 @@ def check(result, log, returncode):
         state = status.get(extra) or ["", ""]
         add("%s source ran" % extra, state[0] not in ("", "failed"), hard=False,
             info="%s %s" % (state[0], state[1]))
+    if IS_WIN and result.get("admin"):
+        add("ETW saw the test key", result.get("etw_test_key"), hard=False)
     return checks
 
 

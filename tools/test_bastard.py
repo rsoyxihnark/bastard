@@ -102,6 +102,8 @@ class Formatting(unittest.TestCase):
         self.assertEqual(b.one_line("a\n  b\tc"), "a b c")
         self.assertEqual(b.clean_text("a\x00b"), "ab")
         self.assertEqual(b.clean_text("a\ud800b"), "a?b")
+        self.assertEqual(b.as_int(float("inf"), 0), 0)
+        self.assertEqual(b.as_int("1e999", 5), 5)
 
     def test_times(self):
         value = b.parse_system_time("2026-10-12T07:23:45.1234567Z")
@@ -143,6 +145,8 @@ class Registry(unittest.TestCase):
                          "HKCU\\Software\\Classes\\.jpg")
         self.assertEqual(b.nice_reg_path("\\REGISTRY\\USER\\S-1-5-18\\X", sid), "HKU\\S-1-5-18\\X")
         self.assertEqual(b.nice_reg_path("HKCU\\X", sid), "HKCU\\X")
+        self.assertEqual(b.nice_reg_path("\\REGISTRY\\USER\\%s1\\Software" % sid, sid), "HKU\\%s1\\Software" % sid)
+        self.assertEqual(b.nice_reg_path("\\REGISTRY\\USER\\%s" % sid, sid), "HKCU")
 
     def test_device_map(self):
         mapper = b.DeviceMap()
@@ -263,6 +267,55 @@ class NewSources(unittest.TestCase):
         for wanted in (b.SRC_ETW, b.SRC_WMI, b.SRC_PROBE, b.SRC_TRACE):
             self.assertIn(wanted, names)
         self.assertEqual(b.ETW_GUID_NAMES["{70EB4F03-C1DE-4F73-A051-33D13D541355}"], "Kernel-Registry")
+        self.assertEqual(b.ETW_GUID_NAMES["{70EB4F03-C1DE-4F73-A051-33D13D5413BD}"], "Kernel-Registry")
+
+    def test_wmi_watches_the_user_keys_where_wmi_can_see_them(self):
+        self.assertEqual(b.wmi_reg_target("HKEY_CURRENT_USER", "Control Panel\\Desktop", "S-1-5-21-7"),
+                         ("HKEY_USERS", "S-1-5-21-7\\\\Control Panel\\\\Desktop"))
+        self.assertIsNone(b.wmi_reg_target("HKEY_CURRENT_USER", "Control Panel\\Desktop", ""))
+        self.assertEqual(b.wmi_reg_target("HKEY_LOCAL_MACHINE", "SOFTWARE\\X", ""), ("HKEY_LOCAL_MACHINE", "SOFTWARE\\\\X"))
+        calls = []
+
+        class Event:
+            def watch_for(self, **where):
+                calls.append(where)
+                raise RuntimeError("no events here")
+
+        class Connection:
+            RegistryValueChangeEvent = Event()
+
+        class Module:
+            @staticmethod
+            def WMI(**options):
+                calls.append(options)
+                return Connection()
+
+        class Com:
+            @staticmethod
+            def CoInitialize():
+                return None
+
+            @staticmethod
+            def CoUninitialize():
+                return None
+
+        class Quiet:
+            user_sid = "S-1-5-21-7"
+
+            def __init__(self, hub):
+                self.hub = hub
+
+        hub = b.Hub(b.Exclusions(()))
+        saved = (b.wmi_module, b.pythoncom)
+        try:
+            b.wmi_module, b.pythoncom = Module, Com
+            b.WmiSource(Quiet(hub))._reg_watch()
+        finally:
+            b.wmi_module, b.pythoncom = saved
+        self.assertEqual(calls[0], {"namespace": "default"})
+        self.assertEqual(calls[1], {"Hive": "HKEY_USERS", "KeyPath": "S-1-5-21-7\\\\Control Panel\\\\Desktop",
+                                    "ValueName": "WallPaper"})
+        self.assertEqual(len(calls), 1 + len(b.WMI_REG_TARGETS))
 
     def test_policy_and_shell_folder_probes(self):
         names = [name for _hive, _path, name in b.PROBE_POLICY_KEYS]
@@ -311,7 +364,7 @@ class NewSources(unittest.TestCase):
         ev = self.etw_event({"EventHeader": header, "ProviderName": "Kernel-Registry", "KeyName": "HKCU\\X"})
         self.assertEqual((ev.pid, ev.proc), (4321, "Photos.exe"))
         self.assertEqual(ev.who(), "Photos.exe (PID 4321)")
-        self.assertEqual(b.process_exclusion_from(ev), "ETW | | Photos.exe")
+        self.assertEqual(b.process_exclusion_from(ev), "ETW | | process=Photos.exe")
 
     def test_trace_tools_rows_keep_the_time_they_happened(self):
         folder = tempfile.mkdtemp(prefix="bastard_trace_")
@@ -468,9 +521,9 @@ class Timeline(unittest.TestCase):
         self.assertFalse(rules.blocks(b.SRC_TRACE, b.INFO, "logman: EventName=FileIo | Type=Read | PID=4"))
         self.assertTrue(hasattr(b.TraceToolSource, "_leave_it_to_etw"))
 
-    def test_the_defaults_are_the_eleven_the_owner_asked_for(self):
+    def test_the_defaults_are_the_twelve_the_owner_asked_for(self):
         rules = b.Exclusions(b.DEFAULT_EXCLUSIONS)
-        self.assertEqual(len(rules.rules), 11)
+        self.assertEqual(len(rules.rules), 12)
         self.assertTrue(rules.blocks(b.SRC_PM, b.INFO,
                                      "read RegQueryValue HKCU\\SOFTWARE\\Microsoft\\Windows\\DWM"
                                      "\\ColorPrevalence"))
@@ -483,7 +536,8 @@ class Timeline(unittest.TestCase):
         self.assertTrue(rules.blocks(b.SRC_ETW, b.INFO, "[Kernel-File] Irp=0xFF | Status=0x0"))
         self.assertTrue(rules.blocks(b.SRC_ETW, b.INFO, "[Microsoft-Windows-Kernel-File] Irp=0xFF"))
         self.assertTrue(rules.blocks(b.SRC_ETW, b.INFO, "x", "", "Provider: Kernel-File\nFileName=C:\\a.jpg"))
-        self.assertFalse(rules.blocks(b.SRC_ETW, b.INFO, "[Kernel-Registry] RegSetValue HKCU\\Software"))
+        self.assertFalse(rules.blocks(b.SRC_ETW, b.CHANGE, "[Kernel-Registry] KeyObject=0xFF | ValueName=WallPaper"))
+        self.assertTrue(rules.blocks(b.SRC_ETW, b.INFO, "[Kernel-Registry] KeyObject=0xFF | ValueName=WallPaper"))
         self.assertFalse(rules.blocks(b.SRC_ETW, b.INFO, "[Shell-Core] wallpaper changed"))
         self.assertFalse(rules.blocks(b.SRC_PM, b.CHANGE, "file WriteFile C:\\TranscodedWallpaper"))
 
@@ -516,6 +570,172 @@ class Timeline(unittest.TestCase):
         self.assertEqual(b.exclusion_from(ev), "ETW | info | [Kernel-File] Irp")
         rules = b.Exclusions([b.exclusion_from(ev)])
         self.assertTrue(rules.blocks(ev.source, ev.level, ev.text))
+
+    def test_a_match_rule_never_carries_a_pipe(self):
+        for source, text in ((b.SRC_WIN, "Dialog opened: Error (app.exe): The file could not be opened | OK"),
+                             (b.SRC_ETW, "[Microsoft-Windows-Shell-Core] Name=Explorer | Value=0x1 | Flags=12345"),
+                             (b.SRC_TRACE, "logman: EventName=FileIo | Type=Read | PID=4")):
+            ev = event(1.0, source, "Kind", b.INFO, text)
+            line = b.exclusion_from(ev)
+            self.assertEqual(line.count("|"), 2, line)
+            self.assertTrue(b.Exclusions([line]).blocks(ev.source, ev.level, ev.text), line)
+
+    def test_procmon_says_listed_for_what_reached_the_list(self):
+        class Fake(b.ProcMonSource):
+            def __init__(self, hub):
+                self.hub = hub
+                self.session = type("S", (), {"markers": []})()
+                self.pml = "x.pml"
+                self.states = []
+                self.notes = []
+
+            def status(self, state, note=""):
+                self.states.append((state, note))
+
+            def note(self, text, level=b.INFO, detail=""):
+                self.notes.append(text)
+
+        hub = b.Hub(b.Exclusions(["ProcMon | | explorer.exe"]))
+        source = Fake(hub)
+        digest = b.ProcmonDigest(1, 100)
+        now = time.time()
+        digest.add(now, "explorer.exe", 5, "RegQueryValue", "HKCU\\A", "SUCCESS")
+        digest.add(now + 1, "explorer.exe", 5, "RegQueryValue", "HKCU\\B", "SUCCESS")
+        digest.add(now + 2, "Photos.exe", 6, "RegSetValue", "HKCU\\C", "SUCCESS")
+        source._publish(digest, "3 events")
+        self.assertEqual(source.states[-1], ("done", "1 listed"))
+        self.assertTrue(source.notes[0].startswith("read 3 events, listed 1 of 3:"), source.notes[0])
+        self.assertNotIn("scope", source.notes[0])
+
+    def test_one_unreadable_procmon_event_does_not_end_the_read(self):
+        class Ev:
+            def __init__(self, index):
+                self.event_class = type("C", (), {"name": "Registry"})()
+                self.operation = type("O", (), {"csv_name": "RegSetValue", "name": "RegSetValue"})()
+                self.result = 0
+                self.date_filetime = b.FILETIME_EPOCH + index * 10000000
+                self.process = type("P", (), {"process_name": "app.exe", "pid": 500})()
+                self.path = "HKCU\\Software\\Thing%d" % index
+
+        class Reader:
+            def __init__(self, _fh, **_options):
+                pass
+
+            def __len__(self):
+                return 100
+
+            def __getitem__(self, index):
+                if index == 10:
+                    raise ValueError("17 is not a valid RegistryOperation")
+                return Ev(index)
+
+        folder = tempfile.mkdtemp()
+        saved = (b.ProcmonLogsReader, b.procmon_result_text)
+        try:
+            pml = os.path.join(folder, "x.pml")
+            with open(pml, "wb") as fh:
+                fh.write(b"x")
+            b.ProcmonLogsReader = Reader
+            b.procmon_result_text = lambda _value: "SUCCESS"
+            source = b.ProcMonSource.__new__(b.ProcMonSource)
+            source.pml = pml
+            source.session = type("S", (), {"abort_event": b.threading.Event(), "user_sid": "",
+                                            "devices": b.DeviceMap()})()
+            source.status = lambda *_args, **_options: None
+            digest = b.ProcmonDigest(1, 1000)
+            ok, info = source._read_pml(digest)
+            self.assertTrue(ok)
+            self.assertEqual(len(digest.rows), 99)
+            self.assertIn("1 could not be read", info)
+            Reader.__getitem__ = lambda _self, _index: (_ for _ in ()).throw(ValueError("unknown"))
+            ok, info = source._read_pml(b.ProcmonDigest(1, 1000))
+            self.assertFalse(ok)
+        finally:
+            b.ProcmonLogsReader, b.procmon_result_text = saved
+            shutil.rmtree(folder, ignore_errors=True)
+
+    def test_trace_tools_counts_only_what_it_listed(self):
+        class Fake(b.TraceToolSource):
+            def __init__(self, session):
+                self.session = session
+                self.hub = session.hub
+                self.mode = "logman"
+                self.etl = "x.etl"
+                self.notes = []
+                self.states = []
+
+            def note(self, text, level=b.INFO, detail=""):
+                self.notes.append(text)
+
+            def status(self, state, note=""):
+                self.states.append((state, note))
+
+        folder = tempfile.mkdtemp()
+        saved = b.PROCMON_ROW_LIMIT
+        start = time.time() - 120
+        try:
+            path = os.path.join(folder, "r.csv")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write("Event Name,Type,PID,Clock-Time\n" + "".join(
+                    "FileIo,%s,%d,%d\n" % ("Skip" if index < 2 else "Read", index, filetime(start + 2.0))
+                    for index in range(12)))
+            b.PROCMON_ROW_LIMIT = 10
+            session = FakeSession(b.Hub(b.Exclusions(["Trace Tools | | Skip"])))
+            session.markers = [(1, start + 1.0)]
+            source = Fake(session)
+            source._publish(path)
+            self.assertEqual(source.hub.snapshot()[1].get(b.SRC_TRACE), 8)
+            self.assertEqual(source.notes[-1], "logman listed 8 of 10 rows, and the capture holds more")
+            self.assertEqual(source.states[-1], ("done", "8 listed"))
+            marks = [ev.text for ev in drained(source.hub) if ev.kind == b.KIND_MARK]
+            self.assertEqual(marks, ["Marker 1: Trace Tools listed 8 events in the 6 seconds after it"])
+        finally:
+            b.PROCMON_ROW_LIMIT = saved
+            shutil.rmtree(folder, ignore_errors=True)
+
+    def test_a_stop_before_every_source_started_fails_none(self):
+        folder = tempfile.mkdtemp()
+        saved = b.PROGRAM_DIR
+        try:
+            b.PROGRAM_DIR = folder
+            hub = b.Hub(b.Exclusions([]))
+            hub.reset(b.SOURCE_NAMES)
+            session = b.Session(hub, b.parse_options([]))
+            session.request_stop()
+            session.begin()
+            session.finish()
+            status, _counts = hub.snapshot()
+            self.assertEqual([name for name, value in status.items() if value[0] == "failed"], [])
+        finally:
+            b.PROGRAM_DIR = saved
+            shutil.rmtree(folder, ignore_errors=True)
+
+    def test_a_marker_summary_at_stop_is_left_to_the_list_once_the_log_is_full(self):
+        folder = tempfile.mkdtemp()
+        saved = b.PROGRAM_DIR
+        try:
+            b.PROGRAM_DIR = folder
+            hub = b.Hub(b.Exclusions([]))
+            hub.reset(b.SOURCE_NAMES)
+            session = b.Session(hub, b.parse_options([]))
+            session.sources = []
+            session.writer = b.LogWriter(os.path.join(folder, "t.log"), ["h"], 400)
+            session.writer.start()
+            hub.writer = session.writer
+            for index in range(60):
+                hub.emit(b.SRC_REG, b.KIND_REG, "HKCU\\Software\\Thing%d %s" % (index, "x" * 40), b.CHANGE)
+            for _ in range(100):
+                if session.writer.capped:
+                    break
+                time.sleep(0.02)
+            self.assertTrue(session.writer.capped)
+            session.markers.append((1, time.time()))
+            session.request_stop()
+            session.finish()
+            self.assertTrue(session.claim_marker(1))
+        finally:
+            b.PROGRAM_DIR = saved
+            shutil.rmtree(folder, ignore_errors=True)
 
     def test_exclusions_round_trip(self):
         folder = tempfile.mkdtemp(prefix="bastard_rules_")
@@ -599,6 +819,35 @@ class Timeline(unittest.TestCase):
         self.assertTrue(digest.full())
         self.assertFalse(b.ProcmonDigest(999, 25).full())
 
+    def test_old_captures_go_by_their_time_whatever_made_them(self):
+        folder = tempfile.mkdtemp()
+        saved = b.TRACE_DIR
+        stamps = ["20261001_10000%d" % index for index in range(7)]
+        try:
+            b.TRACE_DIR = folder
+            for index, stamp in enumerate(stamps):
+                if index % 2:
+                    names = ("Bastard_logman_%s.etl", "Bastard_providers_%s.txt", "Bastard_logman_%s.csv")
+                else:
+                    names = ("Bastard_%s.pml", "Bastard_%s-1.pml", "Bastard_%s.csv")
+                for name in names:
+                    with open(os.path.join(folder, name % stamp), "w") as handle:
+                        handle.write("x")
+            for name in ("notes.txt", "Bastard_%s.log" % stamps[0]):
+                with open(os.path.join(folder, name), "w") as handle:
+                    handle.write("x")
+            b.tidy_captures(stamps[-1])
+            left = sorted(os.listdir(folder))
+        finally:
+            b.TRACE_DIR = saved
+            shutil.rmtree(folder, ignore_errors=True)
+        kept = sorted({b.CAPTURE_RE.match(name).group(1) for name in left if b.CAPTURE_RE.match(name)
+                       and name.endswith(b.CAPTURE_SUFFIXES)})
+        self.assertEqual(kept, stamps[2:])
+        self.assertIn("notes.txt", left)
+        self.assertIn("Bastard_%s.log" % stamps[0], left)
+        self.assertEqual(len(left), 3 * 5 + 2)
+
     def test_a_rule_can_name_a_process(self):
         rules = b.Exclusions(["ProcMon | | explorer.exe"])
         self.assertTrue(rules.blocks("ProcMon", b.INFO, "RegQueryValue HKCU\\Software\\Thing", "explorer.exe"))
@@ -622,9 +871,20 @@ class Timeline(unittest.TestCase):
 
     def test_the_process_rule_the_menu_builds(self):
         ev = event(1.0, b.SRC_PM, "Registry", b.INFO, "RegQueryValue HKCU\\Software\\Thing", "explorer.exe")
-        self.assertEqual(b.process_exclusion_from(ev), "ProcMon | | explorer.exe")
+        self.assertEqual(b.process_exclusion_from(ev), "ProcMon | | process=explorer.exe")
         rules = b.Exclusions([b.process_exclusion_from(ev)])
         self.assertTrue(rules.blocks(ev.source, ev.level, ev.text, ev.proc))
+        self.assertTrue(rules.blocks(ev.source, b.ERROR, "WriteFile C:\\x", "Explorer.exe"))
+        self.assertFalse(rules.blocks(ev.source, b.ERROR, "QueryOpen C:\\Windows\\explorer.exe: ACCESS DENIED",
+                                      "Photos.exe", "Process: Photos.exe (PID 5)"))
+        self.assertFalse(b.Exclusions(["| | process="]).blocks(b.SRC_REG, b.CHANGE, "HKCU\\X [A] added"))
+        long_name = "x" * 200 + ".exe"
+        line = b.process_exclusion_from(event(1.0, b.SRC_PM, "Registry", b.INFO, "RegQueryValue HKCU\\Y", long_name))
+        self.assertTrue(b.Exclusions([line]).blocks(b.SRC_PM, b.INFO, "RegQueryValue HKCU\\Y", long_name))
+        started = b.Exclusions(["Processes | | process=explorer.exe"])
+        self.assertFalse(started.blocks(b.SRC_PROC, b.INFO, "Started Photos.exe (PID 7) by explorer.exe (PID 2)",
+                                        "Photos.exe"))
+        self.assertTrue(started.blocks(b.SRC_PROC, b.INFO, "Started explorer.exe (PID 2)", "explorer.exe"))
         self.assertEqual(b.process_exclusion_from(event(1.0, b.SRC_ETW, "ETW", b.INFO, "x", "")), "")
         self.assertEqual(b.process_exclusion_from(event(1.0, b.SRC_ETW, "ETW", b.INFO, "x", "   ")), "")
 
@@ -779,6 +1039,89 @@ class Timeline(unittest.TestCase):
             self.assertFalse(rules.blocks(source, level, text), text)
         self.assertEqual(rules.blocked, 0)
 
+    def test_etw_hears_the_providers_it_names_and_knows_a_write(self):
+        guids = {}
+        for name, guid, _kernel in b.ETW_RAW_PROVIDERS:
+            guids.setdefault(name, []).append(guid)
+        self.assertEqual(guids["Kernel-Registry"], ["{70EB4F03-C1DE-4F73-A051-33D13D5413BD}",
+                                                    "{70EB4F03-C1DE-4F73-A051-33D13D541355}"])
+        self.assertEqual(guids["Shell-Core"], ["{30336ED4-E327-447C-9DE0-51B652C86108}",
+                                               "{30336ED4-E327-447C-9DE0-51B2E6059F02}"])
+        self.assertEqual(guids["Immersive-Shell"], ["{315A8872-923E-4EA2-9889-33CD4754BF64}",
+                                                    "{BC2C92D8-8DB4-4F8B-8D29-8F3A3A0BF1A4}"])
+        self.assertEqual(guids["Themes"], ["{7B67BEC2-6E2F-4A68-B7E4-9D3E9A4C4C8F}"])
+
+        class Quiet:
+            admin = True
+
+            def __init__(self, hub):
+                self.hub = hub
+
+        class Core:
+            class ProviderInfo:
+                def __init__(self, name, guid, level, keywords):
+                    self.name = name
+                    self.guid = guid
+
+        hub = b.Hub(b.Exclusions(b.DEFAULT_EXCLUSIONS))
+        source = b.EtwRawSource(Quiet(hub))
+        saved_core = (b.etw_core, b.EtwGuid)
+        try:
+            b.etw_core, b.EtwGuid = Core, str
+            providers, used = source._providers()
+        finally:
+            b.etw_core, b.EtwGuid = saved_core
+        self.assertEqual([provider.guid for provider in providers], [guid for _n, guid, _k in b.ETW_RAW_PROVIDERS])
+        self.assertEqual(used, ["Kernel-Registry", "Kernel-File", "Shell-Core", "Immersive-Shell", "Themes"])
+        source.own_pid = 1
+        source.failures = 0
+        stamp = int(time.time() * 10000000) + b.FILETIME_EPOCH
+        header = {"ProcessId": 4321, "TimeStamp": stamp, "ProviderId": "{EDD08927-9CC4-4E65-B970-C2560FB5C289}"}
+        registry = dict(header, ProviderId="{70EB4F03-C1DE-4F73-A051-33D13D5413BD}")
+        saved = b.OWN_TREE
+        try:
+            b.OWN_TREE = b.OwnTree(1)
+            b.OWN_TREE.note(777, 1, time.time() - 5, "Procmon64.exe")
+            source._on((30, {"EventHeader": header, "Task Name": "CREATENEWFILE", "Description": "", "Irp": "0xFF",
+                             "FileName": "\\Device\\HarddiskVolume3\\Users\\me\\x.txt"}))
+            source._on((16, {"EventHeader": header, "Task Name": "WRITE", "Description": "", "Irp": "0xFF",
+                             "IOSize": "0x3"}))
+            source._on((15, {"EventHeader": header, "Task Name": "READ", "Description": "", "Irp": "0xFF",
+                             "IOSize": "0x3"}))
+            source._on((16, {"EventHeader": dict(header, ProcessId=777), "Task Name": "CREATENEWFILE",
+                             "Description": "", "FileName": "\\Device\\HarddiskVolume3\\t.pml"}))
+            source._on((5, {"EventHeader": registry, "Task Name": "MICROSOFT-WINDOWS-KERNEL-REGISTRY",
+                            "Description": "", "KeyObject": "0xFF", "ValueName": "WallPaper"}))
+            source._on((1, {"EventHeader": registry, "Task Name": "MICROSOFT-WINDOWS-KERNEL-REGISTRY",
+                            "Description": "", "Disposition": "2",
+                            "RelativeName": "\\REGISTRY\\USER\\S-1-5-21-1\\Software\\X"}))
+            source._on((1, {"EventHeader": registry, "Task Name": "MICROSOFT-WINDOWS-KERNEL-REGISTRY",
+                            "Description": "", "Disposition": "1",
+                            "RelativeName": "\\REGISTRY\\USER\\S-1-5-21-1\\Software\\New"}))
+            source._on((7, {"EventHeader": registry, "Task Name": "MICROSOFT-WINDOWS-KERNEL-REGISTRY",
+                            "Description": "", "KeyObject": "0xFF", "ValueName": "WallPaper"}))
+            source._on((27, {"EventHeader": header, "Task Name": "RENAMEPATH", "Description": "",
+                             "FilePath": "\\Device\\HarddiskVolume3\\Users\\me\\renamed.jpg"}))
+            source._on((12, {"EventHeader": header, "Task Name": "CREATE", "Description": "",
+                             "CreateOptions": "0x05000060", "FileName": "\\Device\\HarddiskVolume3\\Users\\me\\over.jpg"}))
+            source._on((12, {"EventHeader": header, "Task Name": "CREATE", "Description": "",
+                             "CreateOptions": "0x01000060", "FileName": "\\Device\\HarddiskVolume3\\Users\\me\\open.dll"}))
+        finally:
+            b.OWN_TREE = saved
+        seen = []
+        while True:
+            try:
+                seen.append(hub.ui.get_nowait())
+            except queue.Empty:
+                break
+        self.assertEqual([ev.level for ev in seen], [b.CHANGE] * 5)
+        self.assertIn("x.txt", seen[0].text)
+        self.assertIn("WallPaper", seen[1].text)
+        self.assertIn("New", seen[2].text)
+        self.assertIn("renamed.jpg", seen[3].text)
+        self.assertIn("over.jpg", seen[4].text)
+        self.assertNotIn("t.pml", " ".join(ev.text for ev in seen))
+
     def test_registry_rights_names(self):
         self.assertEqual(b.reg_rights_name(0xF003F), "FullControl")
         self.assertEqual(b.reg_rights_name(0x10000000), "FullControl")
@@ -850,6 +1193,41 @@ class Timeline(unittest.TestCase):
         self.assertFalse(tree.holds(200))
         self.assertTrue(tree.holds(100))
 
+    def test_a_pid_our_helper_left_behind_is_not_ours(self):
+        class Fake(b.ProcessSource):
+            def __init__(self):
+                self.seen = []
+
+            def emit(self, kind, text, level=b.INFO, pid=None, proc="", detail="", ts=None):
+                self.seen.append(text)
+
+        saved = b.OWN_TREE
+        try:
+            b.OWN_TREE = b.OwnTree(100)
+            source = Fake()
+            source._emit_start(4321, 100, "sc.exe", "", 1000.0, "")
+            source._emit_exit(4321, "sc.exe", 0, 0.2, 1000.2)
+            source._emit_start(4321, 640, "Photos.exe", "", 1005.0, "")
+            source._emit_exit(4321, "Photos.exe", 0, 3.0, 1008.0)
+            self.assertEqual(len(source.seen), 2, source.seen)
+            self.assertTrue(source.seen[0].startswith("Started Photos.exe (PID 4321)"), source.seen)
+            digest = b.ProcmonDigest(100, 100)
+            digest.add(1000.1, "sc.exe", 4321, "RegQueryValue", "HKLM\\X", "SUCCESS")
+            digest.add(1006.0, "Photos.exe", 4321, "RegSetValue", "HKCU\\Control Panel\\Desktop", "ACCESS DENIED")
+            self.assertEqual((digest.ours, len(digest.rows)), (1, 1))
+            self.assertEqual(digest.rows[0][1], "Photos.exe")
+            b.OWN_TREE = b.OwnTree(100)
+            source = Fake()
+            source._emit_start(4321, 100, "wevtutil.exe", "", 2000.0, "")
+            source._emit_exit(4321, "wevtutil.exe", 0, 0.2, 2000.2)
+            source._emit_start(4321, 640, "Photos.exe", "", 2000.5, "")
+            self.assertTrue(source.seen[-1].startswith("Started Photos.exe (PID 4321)"), source.seen)
+            digest = b.ProcmonDigest(100, 100)
+            digest.add(2000.6, "Photos.exe", 4321, "RegSetValue", "HKCU\\Control Panel\\Desktop", "ACCESS DENIED")
+            self.assertEqual((digest.ours, len(digest.rows)), (0, 1))
+        finally:
+            b.OWN_TREE = saved
+
     def test_the_digest_skips_our_own_processes(self):
         saved = b.OWN_TREE
         try:
@@ -917,7 +1295,8 @@ class Timeline(unittest.TestCase):
                 self.assertNotIn("powershell", text)
                 self.assertNotIn("conhost", text)
             self.assertTrue(b.OWN_TREE.holds(200))
-            self.assertTrue(b.OWN_TREE.holds(300))
+            self.assertTrue(b.OWN_TREE.holds(300, 1.5))
+            self.assertFalse(b.OWN_TREE.holds(300))
             self.assertFalse(b.OWN_TREE.holds(900))
         finally:
             b.OWN_TREE = saved
@@ -1200,13 +1579,78 @@ class Window(unittest.TestCase):
             self.skipTest("no display: %s" % exc)
         self.root.withdraw()
         self.home = tempfile.mkdtemp()
-        self.saved = (b.SETTINGS_PATH, b.DATA_DIR)
+        self.saved = (b.SETTINGS_PATH, b.DATA_DIR, b.EXCLUSIONS_PATH, b.load_exclusions.__defaults__,
+                      b.save_exclusions.__defaults__, b.PROGRAM_DIR)
         b.DATA_DIR = self.home
+        b.PROGRAM_DIR = self.home
         b.SETTINGS_PATH = os.path.join(self.home, "settings.json")
+        b.EXCLUSIONS_PATH = os.path.join(self.home, "Exclusions.ini")
+        b.load_exclusions.__defaults__ = (b.EXCLUSIONS_PATH,)
+        b.save_exclusions.__defaults__ = (b.EXCLUSIONS_PATH,)
 
     def tearDown(self):
-        b.SETTINGS_PATH, b.DATA_DIR = self.saved
+        (b.SETTINGS_PATH, b.DATA_DIR, b.EXCLUSIONS_PATH, b.load_exclusions.__defaults__,
+         b.save_exclusions.__defaults__, b.PROGRAM_DIR) = self.saved
         shutil.rmtree(self.home, ignore_errors=True)
+
+    def test_a_window_left_on_a_screen_left_of_the_main_one_still_starts(self):
+        self.assertIn(b.geometry_fits(self.root, "1200x800+-1500+40"), (True, False))
+        self.assertFalse(b.geometry_fits(self.root, "1200x800--1500+40"))
+        with open(b.SETTINGS_PATH, "w", encoding="utf-8") as fh:
+            json.dump({"geometry": "1440x880+-1920+100", "sort": ["time"], "show": 1e999}, fh)
+        app = b.App(self.root, b.parse_options([]), b.setup_style(self.root))
+        self.assertEqual(app.sort_column, "")
+        self.assertEqual(app.show_index, 0)
+
+    def test_the_status_line_never_says_the_log_holds_what_it_stopped_before(self):
+        scale = b.setup_style(self.root)
+        app = b.App(self.root, b.parse_options([]), scale)
+        app.rules.set_lines([])
+        app.store = b.Store(limit=5)
+        now = time.time()
+        for index in range(9):
+            app.hub.emit(b.SRC_REG, b.KIND_REG, "HKCU\\Software\\Thing%d" % index, b.CHANGE, ts=now + index)
+        app._drain()
+
+        class Done:
+            writer = b.LogWriter(os.path.join(self.home, "t.log"), ["h"], 1024 * 1024)
+            finished = b.threading.Event()
+            stop_event = b.threading.Event()
+
+        Done.writer.capped = True
+        app.session = Done()
+        self.assertIn("4 more did not fit in the timeline, and the log stopped at its 1 MB limit", app._status_text())
+        Done.writer.capped = False
+        self.assertIn("4 more are only in the log", app._status_text())
+
+    def test_the_panel_says_hidden_at_once_and_in_full(self):
+        scale = b.setup_style(self.root)
+        app = b.App(self.root, b.parse_options([]), scale)
+        app.hub.set_status(b.SRC_PROBE, "done", "settings read once at start")
+        app.hub.set_status(b.SRC_ETW, "running", "Kernel-Registry, Kernel-File, Shell-Core, Immersive-Shell, Themes")
+        app._refresh()
+        probes = app.rows[b.SRC_PROBE]
+        probes.toggle()
+        self.assertTrue(probes.info.cget("text").endswith(", hidden"), probes.info.cget("text"))
+        probes.toggle()
+        self.assertEqual(probes.info.cget("text"), "settings read once at start")
+        etw = app.rows[b.SRC_ETW]
+        etw.toggle()
+        self.assertTrue(etw.info.cget("text").endswith(", hidden"), etw.info.cget("text"))
+        self.assertLessEqual(len(etw.info.cget("text")), 36)
+
+    def test_the_list_holds_only_what_the_timeline_kept(self):
+        scale = b.setup_style(self.root)
+        app = b.App(self.root, b.parse_options([]), scale)
+        app.rules.set_lines([])
+        app.store = b.Store(limit=10)
+        now = time.time()
+        for index in range(30):
+            app.hub.emit(b.SRC_ETW, b.KIND_ETW, "[Kernel-Registry] read %d" % index, b.INFO, ts=now + index)
+        app._drain()
+        self.assertEqual(len(app.tree.get_children()), len(app.store.events()))
+        for iid in app.tree.get_children():
+            self.assertIn(int(iid), app.store.by_seq)
 
     def test_a_rebuild_keeps_the_place_the_list_was_scrolled_to(self):
         scale = b.setup_style(self.root)
@@ -1579,7 +2023,7 @@ class Window(unittest.TestCase):
             app.menu_row = str(ev.seq)
             app.exclude_process()
             self.assertFalse(app.rules.enabled)
-            self.assertEqual(app.rules.lines[-1], "Processes | | noisy.exe")
+            self.assertEqual(app.rules.lines[-1], "Processes | | process=noisy.exe")
             self.assertEqual(written, [app.rules.lines])
             self.assertIn("Use these rules is off", app.flash_text)
             self.assertIsNone(app.rebuild_job)

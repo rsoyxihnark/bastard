@@ -1,5 +1,34 @@
 # Changelog
 
+## 1.8.0
+
+- Bastard 1.8.0 starts again on a side screen, hears the ETW providers it names, and lets a filter rule name a process.
+- Fixed Bastard not starting again after it was last closed on a screen to the left of or above the main one.
+- Fixed ETW never hearing the Kernel-Registry, Shell-Core and Immersive-Shell providers it said it was following.
+- Fixed ETW leaving out every file it saw created, replaced, renamed or deleted.
+- The filter now starts with the ETW Kernel-Registry reads left out, the same way as the Kernel-File reads.
+- Fixed a program going missing from Processes and ProcMon when it reused the PID of a helper Bastard had started and closed.
+- Fixed Leave this process out also hiding rows of other programs that only named that process, such as the programs it started.
+- A filter rule can now name a process as process=name, which matches that process's own rows alone.
+- Fixed Leave this match out not leaving out the event it was made from when that event's text held a | sign.
+- Fixed the panel not saying a source was hidden right after a click, or still saying so after it was shown again.
+- Fixed the word hidden being cut off in the panel beside ETW, Trace Tools and other sources with a long note.
+- Fixed one unreadable row in a ProcMon capture stopping the reading of every row after it.
+- Fixed the status line saying events that did not fit in the timeline were in the log after the log had stopped.
+- Fixed the ProcMon line in the panel, its summary and its Marker lines counting rows the filter had left out as listed.
+- Fixed ETW and Trace Tools showing as failed when Stop was pressed before they had started.
+- Fixed a Marker placed just before Stop saying nothing happened when the trace log had already reached its limit.
+- Fixed the administrator notice leaving out that the kernel ETW providers and Trace Tools need administrator too.
+- Fixed Bastard not starting when its settings file held a value it could not read.
+- Fixed Trace Tools recording on after Stop until the ProcMon capture had been read.
+- Fixed the Trace Tools summary and its Marker lines counting rows the filter had left out, and the summary counting one row too many.
+- Fixed the note about a missing Procmon64.exe leaving out two of the places Bastard looks for it.
+- Fixed another user's registry key being shown as HKCU when that user's ID began with yours.
+- ETW now writes the first events it cannot read into Bastard.log.
+- Fixed WMI never reporting a wallpaper value change.
+- Fixed old Trace Tools captures never being removed from the Traces folder.
+- Fixed the Traces folder keeping fewer than the last five ProcMon captures after Trace Tools had run.
+
 ## 1.7.1
 
 - Bastard 1.7.1 keeps the event list quick while sorted or after Stop, names the process behind ETW rows and tidies old trace logs.
