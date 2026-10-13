@@ -1,11 +1,13 @@
 # Changelog
 
-## 1.7.0
+## 1.8.0
 
-- Bastard 1.7.0 shows a button for every source the panel on the left lists, in the same order, and Esc closes a window.
-- The source buttons along the top now follow the panel on the left exactly, so the two never disagree again.
-- ETW, WMI, Probes and Trace Tools have a button of their own now, so their events can be put aside like any other.
+- Bastard 1.8.0 hides a source with a click in the panel on the left, and the two filter rows above the list are gone.
+- The SOURCE and KIND rows above the list are gone, so the list and the details below have that space back.
+- Clicking a source in the panel on the left hides its events, and clicking it again brings them back.
+- A source left hidden stays hidden the next time Bastard starts, and the panel says beside it that it is hidden.
 - Esc closes the Filter window and the Options window without saving.
+- The Processes list no longer fills up with the helpers Bastard starts for its own checks.
 
 ## 1.6.3
 

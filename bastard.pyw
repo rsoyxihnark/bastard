@@ -25,7 +25,7 @@ import tkinter as tk
 import tkinter.font as tkfont
 from tkinter import filedialog, messagebox, ttk
 
-VERSION = "1.7.0"
+VERSION = "1.8.0"
 
 APP_NAME = "Bastard"
 IS_WIN = os.name == "nt"
@@ -1817,6 +1817,8 @@ class ProcessSource(Source):
 
     def _emit_start(self, pid, ppid, name, path, ts, package):
         OWN_TREE.note(pid, ppid)
+        if OWN_TREE.holds(pid):
+            return
         cmd = ""
         if psutil is not None:
             proc = _safe(lambda: psutil.Process(pid))
@@ -1842,6 +1844,8 @@ class ProcessSource(Source):
         self.emit(KIND_PROC, text, INFO, pid=pid, proc=name, detail="\n".join(detail), ts=ts)
 
     def _emit_exit(self, pid, name, code, lived, ts):
+        if OWN_TREE.holds(pid):
+            return
         text = "Exited " + process_label(name, pid)
         level = INFO
         if code is not None:
@@ -3685,9 +3689,6 @@ SORT_KEYS = {
     "pid": lambda ev: (ev.pid or 0, ev.ts, ev.seq),
     "event": lambda ev: ((ev.text or "").lower(), ev.ts, ev.seq),
 }
-CHIP_SOURCES = tuple(SOURCE_NAMES) + (SRC_SYSTEM,)
-CHIP_KINDS = (KIND_REG, KIND_FILE, KIND_PROC, KIND_WIN, KIND_NET, KIND_DESK, KIND_LOG, KIND_ETW, KIND_PROBE,
-              KIND_SYS)
 DETAIL_HINT = ("Start (F5) begins a trace. Do what you want to watch, press Marker (F8) at the moment you try it, "
                "then Stop (Shift+F5).\n\nSelect an event to see its details here.")
 
@@ -3819,18 +3820,40 @@ class Led(tk.Canvas):
 
 
 class SourceRow(tk.Frame):
-    def __init__(self, parent, name, scale, fonts):
+    def __init__(self, parent, name, scale, fonts, on=True, command=None):
         super().__init__(parent, bg=Theme.PANEL)
+        self.name = name
+        self.on = on
+        self.command = command
         top = tk.Frame(self, bg=Theme.PANEL)
         top.pack(fill="x", pady=(int(5 * scale), 0))
         self.led = Led(top, max(8, int(10 * scale)), Theme.PANEL)
         self.led.pack(side="left", padx=(int(12 * scale), int(8 * scale)))
-        tk.Label(top, text=name, bg=Theme.PANEL, fg=Theme.FG, font=fonts["ui"], anchor="w").pack(side="left")
+        self.title = tk.Label(top, text=name, bg=Theme.PANEL, fg=Theme.FG, font=fonts["ui"], anchor="w")
+        self.title.pack(side="left")
         self.count = tk.Label(top, text="", bg=Theme.PANEL, fg=Theme.DIM, font=fonts["small"])
         self.count.pack(side="right", padx=int(12 * scale))
         self.info = tk.Label(self, text="idle", bg=Theme.PANEL, fg=Theme.DIM, font=fonts["small"], anchor="w")
         self.info.pack(fill="x", padx=(int(30 * scale), int(8 * scale)), pady=(0, int(3 * scale)))
         self.last = None
+        for widget in (self, top, self.led, self.title, self.count, self.info):
+            try:
+                widget.configure(cursor="hand2")
+            except tk.TclError:
+                pass
+            widget.bind("<Button-1>", self.toggle)
+        self._paint()
+
+    def toggle(self, _event=None):
+        self.on = not self.on
+        self._paint()
+        if self.command is not None:
+            self.command()
+
+    def _paint(self):
+        self.title.configure(fg=Theme.FG if self.on else Theme.MUTE)
+        self.count.configure(fg=Theme.DIM if self.on else Theme.MUTE)
+        self.info.configure(fg=Theme.DIM if self.on else Theme.MUTE)
 
     def show(self, state, note, count):
         if (state, note, count) == self.last:
@@ -3838,27 +3861,8 @@ class SourceRow(tk.Frame):
         self.last = (state, note, count)
         self.led.set(STATE_COLORS.get(state, Theme.MUTE))
         self.count.configure(text=str(count) if count else "")
-        self.info.configure(text=shorten(note or STATE_WORDS.get(state, state), 36))
-
-
-class Chip(tk.Label):
-    def __init__(self, parent, text, on, command, font):
-        super().__init__(parent, text=text, padx=8, pady=2, font=font, cursor="hand2", bd=0)
-        self.on = on
-        self.command = command
-        self.bind("<Button-1>", self._toggle)
-        self._paint()
-
-    def _toggle(self, _event=None):
-        self.on = not self.on
-        self._paint()
-        self.command()
-
-    def _paint(self):
-        if self.on:
-            self.configure(bg=Theme.ACCENT, fg=Theme.PANEL)
-        else:
-            self.configure(bg=Theme.PANEL2, fg=Theme.DIM)
+        text = note or STATE_WORDS.get(state, state)
+        self.info.configure(text=shorten(text if self.on else text + ", hidden", 36))
 
 
 def ask_admin(root, scale):
@@ -3930,9 +3934,7 @@ class App:
         self.selftest = None
         self.admin = is_admin()
         saved_sources = self.settings.get("sources") if isinstance(self.settings.get("sources"), dict) else {}
-        saved_kinds = self.settings.get("kinds") if isinstance(self.settings.get("kinds"), dict) else {}
-        self.saved_sources = {name: bool(saved_sources.get(name, True)) for name in CHIP_SOURCES}
-        self.saved_kinds = {name: bool(saved_kinds.get(name, True)) for name in CHIP_KINDS}
+        self.saved_sources = {name: bool(saved_sources.get(name, True)) for name in SOURCE_NAMES}
         show = as_int(self.settings.get("show"), 0)
         self.show_index = show if show in (0, 1, 2) else 0
         self.fonts = {"ui": ("Segoe UI", 9), "bold": ("Segoe UI Semibold", 9), "small": ("Segoe UI", 8),
@@ -4006,11 +4008,12 @@ class App:
         left = tk.Frame(body, bg=Theme.PANEL, width=self.px(250))
         left.pack(side="left", fill="y")
         left.pack_propagate(False)
-        tk.Label(left, text="SOURCES", bg=Theme.PANEL, fg=Theme.DIM, font=("Segoe UI Semibold", 8), anchor="w").pack(
+        tk.Label(left, text="SOURCES, CLICK ONE TO HIDE IT", bg=Theme.PANEL, fg=Theme.DIM,
+                 font=("Segoe UI Semibold", 8), anchor="w").pack(
             side="top", fill="x", padx=self.px(12), pady=(self.px(12), self.px(4)))
         self.rows = {}
         for name in SOURCE_NAMES:
-            row = SourceRow(left, name, self.scale, self.fonts)
+            row = SourceRow(left, name, self.scale, self.fonts, self.saved_sources[name], self._filters_changed)
             row.pack(side="top", fill="x")
             self.rows[name] = row
         legend = tk.Frame(left, bg=Theme.PANEL)
@@ -4028,26 +4031,8 @@ class App:
         right.pack(side="left", fill="both", expand=True)
         filters = tk.Frame(right, bg=Theme.BG, padx=self.px(10), pady=self.px(8))
         filters.pack(side="top", fill="x")
-        tk.Label(filters, text="SOURCE", bg=Theme.BG, fg=Theme.DIM, font=("Segoe UI Semibold", 7)).grid(
-            row=0, column=0, sticky="w", padx=(0, self.px(6)))
-        holder = tk.Frame(filters, bg=Theme.BG)
-        holder.grid(row=0, column=1, sticky="w")
-        self.source_chips = {}
-        for name in CHIP_SOURCES:
-            chip = Chip(holder, name, self.saved_sources[name], self._filters_changed, self.fonts["small"])
-            chip.pack(side="left", padx=1)
-            self.source_chips[name] = chip
-        tk.Label(filters, text="KIND", bg=Theme.BG, fg=Theme.DIM, font=("Segoe UI Semibold", 7)).grid(
-            row=1, column=0, sticky="w", padx=(0, self.px(6)), pady=(self.px(6), 0))
-        holder = tk.Frame(filters, bg=Theme.BG)
-        holder.grid(row=1, column=1, sticky="w", pady=(self.px(6), 0))
-        self.kind_chips = {}
-        for name in CHIP_KINDS:
-            chip = Chip(holder, name, self.saved_kinds[name], self._filters_changed, self.fonts["small"])
-            chip.pack(side="left", padx=1)
-            self.kind_chips[name] = chip
         side = tk.Frame(filters, bg=Theme.BG)
-        side.grid(row=0, column=2, rowspan=2, sticky="e", padx=(self.px(12), 0))
+        side.pack(side="right")
         tk.Label(side, text="Show", bg=Theme.BG, fg=Theme.DIM, font=self.fonts["ui"]).grid(row=0, column=0, sticky="e")
         self.show_box = ttk.Combobox(side, values=SHOW_CHOICES, state="readonly", width=22, font=self.fonts["ui"])
         self.show_box.current(self.show_index)
@@ -4164,11 +4149,8 @@ class App:
             return True
         if self.rules is not None and self.rules.blocks(ev.source, ev.level, ev.text, ev.proc, ev.detail):
             return False
-        chip = self.source_chips.get(ev.source)
-        if chip is not None and not chip.on:
-            return False
-        chip = self.kind_chips.get(ev.kind)
-        if chip is not None and not chip.on:
+        row = self.rows.get(ev.source)
+        if row is not None and not row.on:
             return False
         if self.show_index == 1 and ev.level not in (CHANGE, WARN, ERROR):
             return False
@@ -4551,13 +4533,19 @@ class App:
         window.title("Bastard - " + title)
         window.configure(bg=Theme.PANEL)
         window.transient(self.root)
-        window.bind("<Escape>", lambda _event: window.destroy())
+        window.bind("<Escape>", lambda _event, win=window: self._close_dialog(win))
         try:
             window.geometry("+%d+%d" % (self.root.winfo_rootx() + self.px(70),
                                         self.root.winfo_rooty() + self.px(70)))
         except tk.TclError:
             pass
         return window
+
+    def _close_dialog(self, window):
+        try:
+            window.destroy()
+        except tk.TclError:
+            pass
 
     def _dialog_note(self, window, text, color):
         tk.Label(window, text=text, bg=Theme.PANEL, fg=color, font=self.fonts["small"], anchor="w",
@@ -4657,8 +4645,7 @@ class App:
             data["sash"] = int(self.paned.sashpos(0))
         except tk.TclError:
             pass
-        data["sources"] = {name: chip.on for name, chip in self.source_chips.items()}
-        data["kinds"] = {name: chip.on for name, chip in self.kind_chips.items()}
+        data["sources"] = {name: row.on for name, row in self.rows.items()}
         data["show"] = self.show_index
         data["sort"] = self.sort_column
         data["sort_down"] = self.sort_down

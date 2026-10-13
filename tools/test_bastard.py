@@ -781,19 +781,39 @@ class Timeline(unittest.TestCase):
                                      "RegQueryValue HKCU\\SOFTWARE\\Microsoft\\Windows\\DWM\\ColorPrevalence"))
         self.assertFalse(rules.blocks(b.SRC_PM, b.CHANGE, real.replace("Query", "Set")))
 
-    def test_the_source_chips_follow_the_panel_on_the_left(self):
-        self.assertEqual(list(b.CHIP_SOURCES[:len(b.SOURCE_NAMES)]), list(b.SOURCE_NAMES))
-        self.assertEqual(b.CHIP_SOURCES[len(b.SOURCE_NAMES):], (b.SRC_SYSTEM,))
-        self.assertEqual(len(b.CHIP_SOURCES), len(b.SOURCE_NAMES) + 1)
-        self.assertEqual(len(set(b.CHIP_SOURCES)), len(b.CHIP_SOURCES))
-        for name in b.SOURCE_NAMES:
-            self.assertIn(name, b.CHIP_SOURCES, name)
+    def test_the_filter_rows_above_the_list_are_gone(self):
+        for name in ("CHIP_SOURCES", "CHIP_KINDS", "Chip"):
+            self.assertFalse(hasattr(b, name), name)
+        with io.open(SOURCE, "r", encoding="utf-8") as fh:
+            text = fh.read()
+        self.assertNotIn("kind_chips", text)
+        self.assertNotIn("source_chips", text)
 
-    def test_every_kind_a_source_can_emit_has_a_chip(self):
-        kinds = {value for name, value in vars(b).items() if name.startswith("KIND_")}
-        self.assertEqual(sorted(kinds - set(b.CHIP_KINDS)), [b.KIND_MARK])
-        self.assertEqual(sorted(set(b.CHIP_KINDS) - kinds), [])
-        self.assertEqual(len(set(b.CHIP_KINDS)), len(b.CHIP_KINDS))
+    def test_the_processes_source_leaves_our_own_helpers_out(self):
+        class Fake(b.ProcessSource):
+            def __init__(self):
+                self.seen = []
+
+            def emit(self, kind, text, level=b.INFO, pid=None, proc="", detail="", ts=None):
+                self.seen.append(text)
+                return text
+
+        saved = b.OWN_TREE
+        try:
+            b.OWN_TREE = b.OwnTree(100)
+            source = Fake()
+            source._emit_start(200, 100, "powershell.exe", "", 1.0, "")
+            source._emit_start(300, 200, "conhost.exe", "", 1.0, "")
+            source._emit_start(900, 4, "explorer.exe", "", 1.0, "")
+            source._emit_exit(300, "conhost.exe", 0, 0.1, 2.0)
+            source._emit_exit(900, "explorer.exe", 0, 5.0, 2.0)
+            self.assertEqual(source.seen, ["Started explorer.exe (PID 900) by PID 4",
+                                           "Exited explorer.exe (PID 900) with exit code 0 after 5.0 s"])
+            self.assertTrue(b.OWN_TREE.holds(200))
+            self.assertTrue(b.OWN_TREE.holds(300))
+            self.assertFalse(b.OWN_TREE.holds(900))
+        finally:
+            b.OWN_TREE = saved
 
     def test_marker_summary(self):
         text, level, _ = b.marker_summary(2, 100.0, [event(99.0), event(107.0)])
@@ -965,20 +985,74 @@ class Window(unittest.TestCase):
             self.assertEqual(len(windows), 1, open_it.__name__)
             window = windows[0]
             self.assertIn("<Key-Escape>", window.bind())
-            window.event_generate("<Escape>")
+            app._close_dialog(window)
             self.root.update()
             self.assertEqual([w for w in self.root.winfo_children() if isinstance(w, b.tk.Toplevel)], [],
                              open_it.__name__)
+            app._close_dialog(window)
 
-    def test_the_chip_row_shows_every_source_the_panel_shows(self):
+    def test_the_panel_on_the_left_lists_every_source_in_order(self):
         scale = b.setup_style(self.root)
         app = b.App(self.root, b.parse_options([]), scale)
         self.assertEqual(list(app.rows), list(b.SOURCE_NAMES))
-        chips = list(app.source_chips)
-        self.assertEqual(chips[:len(b.SOURCE_NAMES)], list(b.SOURCE_NAMES))
-        order = [str(chip) for chip in app.source_chips[b.SOURCE_NAMES[0]].master.pack_slaves()]
-        placed = [str(app.source_chips[name]) for name in b.CHIP_SOURCES]
+        left = app.rows[b.SOURCE_NAMES[0]].master
+        placed = [str(app.rows[name]) for name in b.SOURCE_NAMES]
+        order = [str(child) for child in left.pack_slaves()]
         self.assertEqual([one for one in order if one in placed], placed)
+        for name in b.SOURCE_NAMES:
+            self.assertTrue(app.rows[name].on, name)
+            self.assertIn("<Button-1>", app.rows[name].bind())
+
+    def test_clicking_a_source_row_hides_its_events(self):
+        scale = b.setup_style(self.root)
+        app = b.App(self.root, b.parse_options([]), scale)
+        now = time.time()
+        app.hub.emit(b.SRC_REG, b.KIND_REG, "HKCU\\Control Panel\\Desktop [WallPaper]", b.CHANGE, ts=now)
+        app.hub.emit(b.SRC_PROC, b.KIND_PROC, "Started Photos.exe (PID 7)", ts=now + 1)
+        app.hub.emit(b.SRC_SYSTEM, b.KIND_SYS, "Trace started", ts=now + 2)
+        app._drain()
+        if app.rebuild_job is not None:
+            app.root.after_cancel(app.rebuild_job)
+            app.rebuild_job = None
+        app._rebuild()
+        self.assertEqual(len(app.tree.get_children()), 3)
+        app.rows[b.SRC_PROC].toggle()
+        app._rebuild()
+        self.assertEqual(len(app.tree.get_children()), 2)
+        self.assertFalse(app.rows[b.SRC_PROC].on)
+        self.assertEqual(app.rows[b.SRC_PROC].title.cget("fg"), b.Theme.MUTE)
+        app.rows[b.SRC_PROC].toggle()
+        app._rebuild()
+        self.assertEqual(len(app.tree.get_children()), 3)
+        self.assertEqual(app.rows[b.SRC_PROC].title.cget("fg"), b.Theme.FG)
+
+    def test_the_system_channel_cannot_be_hidden_by_a_row(self):
+        scale = b.setup_style(self.root)
+        app = b.App(self.root, b.parse_options([]), scale)
+        self.assertNotIn(b.SRC_SYSTEM, app.rows)
+        now = time.time()
+        app.hub.emit(b.SRC_SYSTEM, b.KIND_SYS, "Trace stopped after 8 seconds", ts=now)
+        app._drain()
+        if app.rebuild_job is not None:
+            app.root.after_cancel(app.rebuild_job)
+            app.rebuild_job = None
+        for row in app.rows.values():
+            row.on = False
+        app._rebuild()
+        self.assertEqual(len(app.tree.get_children()), 1)
+
+    def test_the_rows_that_are_hidden_are_kept_for_the_next_start(self):
+        scale = b.setup_style(self.root)
+        app = b.App(self.root, b.parse_options([]), scale)
+        app.rows[b.SRC_ETW].toggle()
+        app.rows[b.SRC_PM].toggle()
+        app._save_settings()
+        saved = b.load_settings()
+        self.assertFalse(saved["sources"][b.SRC_ETW])
+        self.assertFalse(saved["sources"][b.SRC_PM])
+        self.assertTrue(saved["sources"][b.SRC_REG])
+        self.assertNotIn("kinds", saved)
+        self.assertEqual(sorted(saved["sources"]), sorted(b.SOURCE_NAMES))
 
     def test_filters_search_and_selection(self):
         scale = b.setup_style(self.root)
@@ -1004,10 +1078,10 @@ class Window(unittest.TestCase):
         app._filters_changed()
         app._rebuild()
         self.assertEqual(len(app.tree.get_children()), 2)
-        app.source_chips[b.SRC_PROC]._toggle()
+        app.rows[b.SRC_PROC].toggle()
         app._rebuild()
         self.assertEqual(len(app.tree.get_children()), 1)
-        app.source_chips[b.SRC_PROC]._toggle()
+        app.rows[b.SRC_PROC].toggle()
         app.search_var.set("")
         app._filters_changed()
         app._rebuild()
