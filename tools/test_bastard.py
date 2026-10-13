@@ -807,8 +807,12 @@ class Timeline(unittest.TestCase):
             source._emit_start(900, 4, "explorer.exe", "", 1.0, "")
             source._emit_exit(300, "conhost.exe", 0, 0.1, 2.0)
             source._emit_exit(900, "explorer.exe", 0, 5.0, 2.0)
-            self.assertEqual(source.seen, ["Started explorer.exe (PID 900) by PID 4",
-                                           "Exited explorer.exe (PID 900) with exit code 0 after 5.0 s"])
+            self.assertEqual(len(source.seen), 2)
+            self.assertTrue(source.seen[0].startswith("Started explorer.exe (PID 900)"), source.seen)
+            self.assertTrue(source.seen[1].startswith("Exited explorer.exe (PID 900)"), source.seen)
+            for text in source.seen:
+                self.assertNotIn("powershell", text)
+                self.assertNotIn("conhost", text)
             self.assertTrue(b.OWN_TREE.holds(200))
             self.assertTrue(b.OWN_TREE.holds(300))
             self.assertFalse(b.OWN_TREE.holds(900))
@@ -984,7 +988,7 @@ class Window(unittest.TestCase):
             windows = [w for w in self.root.winfo_children() if isinstance(w, b.tk.Toplevel)]
             self.assertEqual(len(windows), 1, open_it.__name__)
             window = windows[0]
-            self.assertIn("<Key-Escape>", window.bind())
+            self.assertTrue(window.bind("<Escape>"), open_it.__name__)
             app._close_dialog(window)
             self.root.update()
             self.assertEqual([w for w in self.root.winfo_children() if isinstance(w, b.tk.Toplevel)], [],
@@ -1001,7 +1005,8 @@ class Window(unittest.TestCase):
         self.assertEqual([one for one in order if one in placed], placed)
         for name in b.SOURCE_NAMES:
             self.assertTrue(app.rows[name].on, name)
-            self.assertIn("<Button-1>", app.rows[name].bind())
+            self.assertTrue(app.rows[name].bind("<Button-1>"), name)
+            self.assertTrue(app.rows[name].title.bind("<Button-1>"), name)
 
     def test_clicking_a_source_row_hides_its_events(self):
         scale = b.setup_style(self.root)

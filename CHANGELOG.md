@@ -1,8 +1,8 @@
 # Changelog
 
-## 1.8.0
+## 1.7.0
 
-- Bastard 1.8.0 hides a source with a click in the panel on the left, and the two filter rows above the list are gone.
+- Bastard 1.7.0 hides a source with a click in the panel on the left, and the two filter rows above the list are gone.
 - The SOURCE and KIND rows above the list are gone, so the list and the details below have that space back.
 - Clicking a source in the panel on the left hides its events, and clicking it again brings them back.
 - A source left hidden stays hidden the next time Bastard starts, and the panel says beside it that it is hidden.
