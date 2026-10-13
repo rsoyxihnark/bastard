@@ -1,12 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# V3FINAL.py - Windows Forensic Diagnostic & Trace Tool
-#
-# MERGED & ENHANCED:
-# - Master-Detail UI layout (Treeview + Detail Text pane)
-# - Bulletproof fallbacks (runs without any pip packages via ctypes/logman)
-# - Combined diagnostic probes (Policy, Permissions, Shell verbs, Appx)
-# - Robust EventBus with anti-freeze queue draining
 
 import os, sys, time, json, csv, re, threading, queue, traceback
 import subprocess, tempfile, ctypes
@@ -20,7 +11,6 @@ from tkinter import ttk, filedialog, messagebox, font as tkfont, scrolledtext
 try: import winreg
 except ImportError: winreg = None
 
-# Optional Dependencies
 HAVE_PSUTIL = HAVE_WMI = HAVE_ETW = HAVE_PROCMON = HAVE_WATCHDOG = False
 try: import psutil; HAVE_PSUTIL = True
 except ImportError: pass
@@ -33,9 +23,6 @@ except ImportError: pass
 try: from watchdog.observers import Observer; from watchdog.events import FileSystemEventHandler; HAVE_WATCHDOG = True
 except ImportError: pass
 
-# ===========================================================================
-# Globals & Config
-# ===========================================================================
 TAG = "V3FINAL"
 CREATE_NO_WINDOW = 0x08000000
 
@@ -100,9 +87,6 @@ def relaunch_as_admin():
         startup_log(f"Elevation failed: {e}")
         return False
 
-# ===========================================================================
-# Event Model & Bus
-# ===========================================================================
 class UEvent:
     __slots__ = ("ts", "source", "type", "pid", "detail", "level")
     def __init__(self, source, type_, pid, detail, level="INFO"):
@@ -159,9 +143,6 @@ def emit(source, type_, detail, pid=0, level="INFO"):
     live_log(f"[{level}] {source}/{type_} {detail[:400]}")
     return ev
 
-# ===========================================================================
-# Registry & Helpers
-# ===========================================================================
 def _safe_val(val, typ):
     if winreg and typ == winreg.REG_BINARY:
         if not val: return "<empty binary>"
@@ -207,9 +188,6 @@ class StopFlag:
     def is_set(self): return self.evt.is_set()
     def wait(self, t): return self.evt.wait(t)
 
-# ===========================================================================
-# Collectors
-# ===========================================================================
 def collector_regpoll(stop):
     if not winreg: return STATUS.set("RegPoll", "red", "winreg yok")
     targets = [
@@ -358,7 +336,6 @@ def collector_etw(stop):
         except Exception as e:
             emit("ETW", "Error", f"pywintrace fail: {e}", level="LOW")
 
-    # Fallback to logman
     tmp = tempfile.mkdtemp(prefix="bastard_")
     etl = os.path.join(tmp, "trace.etl"); csvp = os.path.join(tmp, "trace.csv"); pf = os.path.join(tmp, "provs.txt")
     try:
@@ -442,7 +419,7 @@ class HookCollector:
                         emit("Hook", "Window", f"WinEvent {hex(event)} class={cls.value} title={ttl.value}", pid=pid.value)
                 except: pass
             self.win_proc = WINEVENTPROC(cb)
-            for ev in (0x8000, 0x8002): # CREATE, SHOW
+            for ev in (0x8000, 0x8002):
                 h = user32.SetWinEventHook(ev, ev, None, self.win_proc, 0, 0, 0x0000 | 0x0002)
                 if h: self.win_hooks.append(h)
             if self.win_hooks: STATUS.set("Hook", "green", "winevent")
@@ -452,13 +429,9 @@ class HookCollector:
             try: ctypes.windll.user32.UnhookWinEvent(ctypes.c_void_p(h))
             except: pass
 
-# ===========================================================================
-# Diagnostic Probes
-# ===========================================================================
 def run_all_probes():
     emit("Diag", "System", "=== Diagnostic Probes Started ===", level="INFO")
     
-    # Policy Checks
     pol = [
         (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\ActiveDesktop", "NoChangingWallpaper"),
         (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Policies\Microsoft\Windows\Personalization", "NoLockScreen"),
@@ -469,7 +442,6 @@ def run_all_probes():
         if v and int(v) != 0: emit("Diag", "Policy", f"[FAIL] Policy block aktif: {p}\\{n}={v}", level="HIGH")
         else: emit("Diag", "Policy", f"[OK] {n} temiz", level="OK")
 
-    # Shell Verbs
     try:
         any_found = False
         for b in [r"SystemFileAssociations\.jpg\shell\setaswallpaper", r"SystemFileAssociations\.png\shell\setaswallpaper"]:
@@ -478,13 +450,11 @@ def run_all_probes():
         if not any_found: emit("Diag", "Shell", "[FAIL] Sağ tık Set As Desktop Background silinmiş!", level="HIGH")
     except: pass
 
-    # AppPrivacy & Consent
     for cap in ["picturesLibrary", "userAccountInformation"]:
         v = reg_get(winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\\" + cap, "Value")
         if str(v) == "Deny": emit("Diag", "Privacy", f"[FAIL] Consent {cap} = Deny", level="HIGH")
         else: emit("Diag", "Privacy", f"[OK] Consent {cap} = {v or 'unset'}", level="OK")
 
-    # Appx Packages
     try:
         r = _run_silent(["powershell", "-Command", "(Get-AppxPackage Microsoft.Windows.Photos).Capabilities | ForEach-Object { $_.Name }"], capture_output=True)
         if r.returncode == 0:
@@ -493,9 +463,6 @@ def run_all_probes():
             else: emit("Diag", "Appx", "[OK] Photos yetkileri tam.", level="OK")
     except: pass
 
-# ===========================================================================
-# GUI Theme & Layout
-# ===========================================================================
 class T:
     BG       = "#11111b"
     PANEL    = "#181825"
@@ -547,7 +514,6 @@ class App(object):
         s.configure("Treeview.Heading", background=T.PANEL2, foreground=T.FG, font=("Segoe UI", 9, "bold"), borderwidth=0)
 
     def _build_ui(self):
-        # Toolbar
         tb = tk.Frame(self.root, bg=T.PANEL2, padx=10, pady=10)
         tb.pack(side="top", fill="x")
         self.btn_start = ttk.Button(tb, text="▶ START TRACE", style="Accent.TButton", command=self.on_start)
@@ -564,11 +530,9 @@ class App(object):
         ttk.Button(tb, text="SPI API Test", command=self.action_spi_test).pack(side="left", padx=2)
         ttk.Button(tb, text="Save CSV", command=self.action_save_csv).pack(side="right", padx=5)
 
-        # Main Body
         body = tk.Frame(self.root, bg=T.BG)
         body.pack(side="top", fill="both", expand=True)
 
-        # Sidebar (Status)
         left = tk.Frame(body, bg=T.PANEL, width=200)
         left.pack(side="left", fill="y")
         left.pack_propagate(False)
@@ -585,11 +549,9 @@ class App(object):
             lbl.pack(side="left", padx=5)
             self.leds[src] = (cv, dot, lbl)
 
-        # Right Splitter (Treeview + Details)
         right = tk.Frame(body, bg=T.BG)
         right.pack(side="left", fill="both", expand=True, padx=10, pady=10)
 
-        # Filters
         ff = tk.Frame(right, bg=T.BG)
         ff.pack(fill="x", pady=(0, 10))
         for k, v in self.f_src.items():
@@ -600,11 +562,9 @@ class App(object):
         self.search_var.trace_add("write", lambda *a: self.refresh_tree())
         tk.Label(ff, text="Search:", bg=T.BG, fg=T.FG).pack(side="right", padx=5)
 
-        # PanedWindow
         pw = ttk.PanedWindow(right, orient="vertical")
         pw.pack(fill="both", expand=True)
 
-        # Treeview
         tf = tk.Frame(pw, bg=T.BG)
         pw.add(tf, weight=3)
         cols = ("Time", "Source", "Type", "PID", "Level", "Detail")
@@ -628,14 +588,12 @@ class App(object):
 
         self.tree.bind("<<TreeviewSelect>>", self.on_tree_select)
 
-        # Details Text
         df = tk.Frame(pw, bg=T.BG)
         pw.add(df, weight=1)
         tk.Label(df, text="Event Details (Master-Detail View)", bg=T.BG, fg=T.ACCENT, font=("Segoe UI", 9, "bold")).pack(anchor="w")
         self.detail_txt = scrolledtext.ScrolledText(df, bg=T.PANEL, fg=T.FG, font=("Consolas", 10), wrap="word", borderwidth=0)
         self.detail_txt.pack(fill="both", expand=True, pady=5)
 
-        # Status Bar
         self.sb = tk.Label(self.root, text="Ready", bg=T.PANEL3, fg=T.FG, anchor="w", padx=10)
         self.sb.pack(side="bottom", fill="x")
 
@@ -742,7 +700,7 @@ class App(object):
         p = filedialog.askopenfilename(title="Wallpaper Resmi Seç", filetypes=[("Images", "*.jpg *.png *.bmp")])
         if not p: return
         def _r():
-            ok = ctypes.windll.user32.SystemParametersInfoW(20, 0, p, 1 | 2) # SPI_SETDESKWALLPAPER
+            ok = ctypes.windll.user32.SystemParametersInfoW(20, 0, p, 1 | 2)
             if ok: emit("Diag", "API", "SPI_SETDESKWALLPAPER Başarılı. API sağlam.", level="OK")
             else: emit("Diag", "API", f"SPI HATA: {ctypes.get_last_error()}", level="HIGH")
         threading.Thread(target=_r, daemon=True).start()
@@ -763,9 +721,6 @@ class App(object):
         if self.hook: self.hook.uninstall()
         self.root.destroy()
 
-# ===========================================================================
-# Bootstrap
-# ===========================================================================
 def main():
     admin = is_admin()
     if not admin:

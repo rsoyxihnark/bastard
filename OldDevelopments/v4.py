@@ -1,12 +1,3 @@
-#!/usr/bin/env pythonw
-# olayyeri_v2.pyw - Unified Windows Trace Toolkit (v2.2 FINAL)
-# Tum fixler birlesik:
-#  - Desktop canli log (SHGetKnownFolderPath ile dogru Desktop)
-#  - WMICollector pythoncom.CoInitialize fix
-#  - WMI registry watcher WQL fix (keyword args)
-#  - Win32 hook devre disi (global hook DLL ister)
-#  - ProcMon: benzersiz PML, eski PML temizligi, registry temizligi, graceful kill
-#  - Bagimliliklari tek tikla kur butonu
 
 import tkinter as tk
 from tkinter import ttk, scrolledtext, filedialog, messagebox
@@ -15,7 +6,6 @@ import json, ctypes, atexit
 from datetime import datetime
 from pathlib import Path
 
-# ---------- Opsiyonel bagimliliklar ----------
 HAVE_PSUTIL = HAVE_WMI = HAVE_WIN32 = HAVE_ETW = HAVE_PROCMON_PARSER = False
 
 try:
@@ -42,10 +32,7 @@ NO_WINDOW = 0x08000000
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 
-# ---------- Desktop bul (SHGetKnownFolderPath) ----------
 def find_desktop():
-    """SHGetKnownFolderPath(FOLDERID_Desktop) ile GERCEK Desktop'i bul.
-    OneDrive yonlendirmesi / Turkce 'Masaustu' hepsi calisir."""
     try:
         class GUID(ctypes.Structure):
             _fields_ = [("Data1", ctypes.c_ulong),
@@ -79,7 +66,6 @@ def find_desktop():
 DESKTOP = find_desktop()
 
 
-# ---------- ProcMon exe bul ----------
 def find_procmon():
     cands = []
     for d in (BASE_DIR, str(DESKTOP), os.getcwd(), r'C:\Tools', r'C:\Sysinternals'):
@@ -97,7 +83,6 @@ def find_procmon():
 PROCMON_EXE = find_procmon()
 
 
-# ---------- Birlesik Event ----------
 class UEvent:
     __slots__ = ('ts', 'source', 'etype', 'pid', 'details', 'level', 'raw')
     def __init__(self, source, etype, details, pid=None, level='info', raw=None):
@@ -113,9 +98,6 @@ class UEvent:
         return f'{ts} [{self.source}] [{self.etype}] {self.details}'
 
 
-# =================================================================
-#  1. PROCMON COLLECTOR
-# =================================================================
 class ProcMonCollector(threading.Thread):
     def __init__(self, emit, base_dir):
         super().__init__(daemon=True)
@@ -172,7 +154,6 @@ class ProcMonCollector(threading.Thread):
         self._shutdown_procmon()
 
     def _cleanup_old_pmls(self):
-        """Onceki calismalardan kalan trace_*.pml dosyalarini sil."""
         try:
             for f in os.listdir(self.base_dir):
                 if f.lower().startswith('trace_') and f.lower().endswith('.pml'):
@@ -186,8 +167,6 @@ class ProcMonCollector(threading.Thread):
             pass
 
     def _clear_procmon_registry(self):
-        """ProcMon son backing-file yolunu registry'de sakliyor.
-        Corrupt oldugu icin acilista dialog cikartiyor. Her baslangicta sil."""
         try:
             k = winreg.OpenKey(winreg.HKEY_CURRENT_USER,
                 r'Software\Sysinternals\Process Monitor', 0,
@@ -204,7 +183,6 @@ class ProcMonCollector(threading.Thread):
             pass
 
     def _shutdown_procmon(self):
-        """Once yumusak (WM_CLOSE), sonra /F. Boylece PML duzgun kapanir."""
         if not self.proc:
             return
         try:
@@ -278,9 +256,6 @@ class ProcMonCollector(threading.Thread):
         self.running = False
 
 
-# =================================================================
-#  2. ETW COLLECTOR
-# =================================================================
 class ETWCollector(threading.Thread):
     KERNEL_REGISTRY = '{70EB4F03-C1DE-4F73-A051-33D13D541355}'
     KERNEL_FILE = '{EDD08927-9CC4-4E65-B970-C2560FB5C289}'
@@ -363,9 +338,6 @@ class ETWCollector(threading.Thread):
         self.running = False
 
 
-# =================================================================
-#  3. WMI COLLECTOR  (CoInitialize + WQL fix)
-# =================================================================
 class WMICollector(threading.Thread):
     def __init__(self, emit):
         super().__init__(daemon=True)
@@ -401,7 +373,6 @@ class WMICollector(threading.Thread):
                 self.emit(UEvent('WMI', 'Error',
                     f'Process watcher: {e}', level='error'))
 
-            # WQL backslash escaping YOK. Keyword arguman guvenli.
             reg_keys = [
                 ('HKEY_CURRENT_USER', r'Control Panel\Desktop', 'WallPaper'),
                 ('HKEY_CURRENT_USER', r'Control Panel\Desktop', 'WallpaperStyle'),
@@ -483,9 +454,6 @@ class WMICollector(threading.Thread):
         self.running = False
 
 
-# =================================================================
-#  4. PSUTIL COLLECTOR
-# =================================================================
 class PSUtilCollector(threading.Thread):
     TARGETS = ('photos.exe', 'runtimebroker.exe', 'dllhost.exe',
                'shellexperiencehost.exe', 'explorer.exe', 'sihost.exe',
@@ -562,9 +530,6 @@ class PSUtilCollector(threading.Thread):
         self.running = False
 
 
-# =================================================================
-#  5. WIN32 COLLECTOR (sadece EventLog; hook devre disi)
-# =================================================================
 class Win32Collector(threading.Thread):
     def __init__(self, emit):
         super().__init__(daemon=True)
@@ -647,9 +612,6 @@ class Win32Collector(threading.Thread):
         self.running = False
 
 
-# =================================================================
-#  6. UNIFIED TRACER
-# =================================================================
 class UnifiedTracer:
     def __init__(self, emit):
         self.emit = emit
@@ -729,9 +691,6 @@ class UnifiedTracer:
             f'(sure: {datetime.now() - self.start_time})', level='info'))
 
 
-# =================================================================
-#  GUI
-# =================================================================
 class App:
     SOURCES = {
         'ProcMon': {'label': 'ProcMon', 'color': '#ff9f43'},
@@ -759,7 +718,6 @@ class App:
         self.live_log_fh = None
         self.live_log_path = None
 
-        # ---- Ust Bar ----
         top = ttk.Frame(root, padding=6); top.pack(fill='x')
         self.btn_start = ttk.Button(top, text='\u25b6 Trace Baslat',
                                     command=self.start)
@@ -783,7 +741,6 @@ class App:
         self.status = ttk.Label(top, text=f'Desktop: {DESKTOP}', foreground='gray')
         self.status.pack(side='right')
 
-        # ---- Collector durum ----
         stat = ttk.Frame(root, padding=(6, 0)); stat.pack(fill='x')
         self.collector_labels = {}
         for src, meta in self.SOURCES.items():
@@ -796,7 +753,6 @@ class App:
         self.log_path_lbl = ttk.Label(stat, text='', foreground='#666')
         self.log_path_lbl.pack(side='right')
 
-        # ---- Filtre ----
         filt = ttk.LabelFrame(root, text='Filtre', padding=6)
         filt.pack(fill='x', padx=6, pady=(4, 0))
         self.f_sources = {}
@@ -822,7 +778,6 @@ class App:
         ent.pack(side='left', padx=4)
         ent.bind('<KeyRelease>', lambda e: self.refilter())
 
-        # ---- Log ----
         wrap = ttk.Frame(root); wrap.pack(fill='both', expand=True, padx=6, pady=6)
         self.txt = scrolledtext.ScrolledText(
             wrap, wrap='none', font=('Consolas', 9),
@@ -842,7 +797,6 @@ class App:
         atexit.register(self._close_logfile)
         root.after(60, self._drain)
 
-    # ---- Live log ----
     def _open_logfile(self):
         self._close_logfile()
         ts = datetime.now().strftime('%Y%m%d_%H%M%S')
@@ -880,7 +834,6 @@ class App:
         except Exception:
             pass
 
-    # ---- Event queue ----
     def _emit_u(self, uevent):
         self.queue.put(uevent)
 
@@ -931,7 +884,6 @@ class App:
             if self._passes(ev):
                 self._write_event(ev)
 
-    # ---- Actions ----
     def start(self):
         self._open_logfile()
         threading.Thread(target=self.tracer.start, daemon=True).start()

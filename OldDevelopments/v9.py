@@ -1,11 +1,3 @@
-#!/usr/bin/env python
-# 18.py - Bastard v4 Unified Trace Toolkit
-# Buyuk degisiklikler:
-#  - RegistryPoller: WMI olmadan saniyede 2 kez registry diff (Photos icin kesin)
-#  - FileWatchCollector: %APPDATA%\Themes + Photos LocalState izler
-#  - ProcMon: full registry reset, final read AFTER shutdown, dosya boyut tani
-#  - WMI registry hatasi gorunur loglandi
-#  - ETW mesaji duzeltildi
 
 import tkinter as tk
 from tkinter import ttk, scrolledtext, filedialog, messagebox
@@ -47,9 +39,6 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 SCRIPT_STEM = Path(__file__).stem or '18'
 
 
-# =================================================================
-#  ADMIN / ELEVATION
-# =================================================================
 _shell_execute = ctypes.windll.shell32.ShellExecuteW
 _shell_execute.restype = ctypes.c_ssize_t
 SW_SHOWNORMAL = 1
@@ -115,9 +104,6 @@ def _show_admin_prompt(parent) -> str:
     return result['value']
 
 
-# =================================================================
-#  YARDIMCILAR
-# =================================================================
 def find_desktop():
     try:
         class GUID(ctypes.Structure):
@@ -168,7 +154,6 @@ def find_procmon():
 PROCMON_EXE = find_procmon()
 
 
-# --- Registry polling hedefleri (Photos Set As icin) ---
 REG_POLL_TARGETS = [
     ('HKCU', r'Control Panel\Desktop'),
     ('HKCU', r'Control Panel\Desktop\WindowMetrics'),
@@ -185,7 +170,6 @@ HIVE_MAP = {'HKCU': winreg.HKEY_CURRENT_USER,
             'HKLM': winreg.HKEY_LOCAL_MACHINE}
 
 
-# --- File watcher hedefleri ---
 def file_watch_targets():
     targets = []
     ad = os.environ.get('APPDATA', '')
@@ -230,9 +214,6 @@ class UEvent:
                 f'[{self.source}] [{self.etype}] {self.details}')
 
 
-# =================================================================
-#  0. REGISTRY POLLER (WMI'siz, kesin calisir)
-# =================================================================
 class RegistryPoller(threading.Thread):
     def __init__(self, emit, interval=0.5):
         super().__init__(daemon=True)
@@ -319,9 +300,6 @@ class RegistryPoller(threading.Thread):
         self.running = False
 
 
-# =================================================================
-#  0b. FILE WATCH (Themes + Photos AppData)
-# =================================================================
 class FileWatchCollector(threading.Thread):
     def __init__(self, emit):
         super().__init__(daemon=True)
@@ -381,9 +359,6 @@ class FileWatchCollector(threading.Thread):
         self.running = False
 
 
-# =================================================================
-#  1. PROCMON (final read AFTER shutdown fix)
-# =================================================================
 class ProcMonCollector(threading.Thread):
     def __init__(self, emit, base_dir):
         super().__init__(daemon=True)
@@ -426,7 +401,6 @@ class ProcMonCollector(threading.Thread):
                 f'ProcMon baslatilamadi: {e}', level='error'))
             return
 
-        # 2 saniye sonra dosya olustu mu kontrol et
         time.sleep(2.0)
         if os.path.exists(self.pml_path):
             sz = os.path.getsize(self.pml_path)
@@ -449,7 +423,6 @@ class ProcMonCollector(threading.Thread):
                 self.emit(UEvent('ProcMon', 'Error',
                     f'PML read: {e}', level='error'))
 
-        # >>> FIX: once ProcMon'u kapat, dosya tam yazilsin, SONRA son okuma <<<
         self._shutdown_procmon()
         time.sleep(1.5)
         try:
@@ -488,8 +461,6 @@ class ProcMonCollector(threading.Thread):
         except Exception: pass
 
     def _reset_procmon_registry(self):
-        """ProcMon registry anahtarini TAMAMEN sil. Boylece son filtre
-        ve son backing file referansi temizlenir."""
         try:
             subprocess.run(
                 ['reg', 'delete',
@@ -596,9 +567,6 @@ class ProcMonCollector(threading.Thread):
         self.running = False
 
 
-# =================================================================
-#  2. ETW
-# =================================================================
 class ETWCollector(threading.Thread):
     KERNEL_REGISTRY = '{70EB4F03-C1DE-4F73-A051-33D13D541355}'
     KERNEL_FILE = '{EDD08927-9CC4-4E65-B970-C2560FB5C289}'
@@ -708,9 +676,6 @@ class ETWCollector(threading.Thread):
         self.running = False
 
 
-# =================================================================
-#  3. WMI
-# =================================================================
 class WMICollector(threading.Thread):
     def __init__(self, emit):
         super().__init__(daemon=True)
@@ -786,9 +751,6 @@ class WMICollector(threading.Thread):
         self.running = False
 
 
-# =================================================================
-#  4. PSUTIL
-# =================================================================
 class PSUtilCollector(threading.Thread):
     TARGETS = ('photos.exe', 'runtimebroker.exe', 'dllhost.exe',
                'shellexperiencehost.exe', 'explorer.exe', 'sihost.exe',
@@ -847,9 +809,6 @@ class PSUtilCollector(threading.Thread):
         self.running = False
 
 
-# =================================================================
-#  5. WIN32 (EventLog)
-# =================================================================
 class Win32Collector(threading.Thread):
     def __init__(self, emit):
         super().__init__(daemon=True)
@@ -970,9 +929,6 @@ class Win32Collector(threading.Thread):
         self.running = False
 
 
-# =================================================================
-#  6. UNIFIED TRACER
-# =================================================================
 class UnifiedTracer:
     def __init__(self, emit):
         self.emit = emit
@@ -1014,7 +970,6 @@ class UnifiedTracer:
             'En az 20 saniye trace et.', level='error'))
 
         collectors = []
-        # RegPoll ve FileWatch her zaman aktif, WMI/ETW'ye bagimli degil
         collectors.append(RegistryPoller(self.emit))
         if HAVE_WATCHDOG:
             collectors.append(FileWatchCollector(self.emit))
@@ -1051,9 +1006,6 @@ class UnifiedTracer:
             f'{datetime.now() - self.start_time}', level='error'))
 
 
-# =================================================================
-#  GUI
-# =================================================================
 class App:
     SOURCES = {
         'RegPoll':   {'label': 'RegPoll', 'color': '#f0c060'},

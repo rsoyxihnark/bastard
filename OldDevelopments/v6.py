@@ -1,7 +1,3 @@
-#!/usr/bin/env pythonw
-# 17.py - Bastard Unified Trace Toolkit v3
-# Admin prompt on launch + tum onceki ozellikler.
-# Adimlar: IsUserAnAdmin -> prompt -> ShellExecuteW runas -> yeniden baslat.
 
 import tkinter as tk
 from tkinter import ttk, scrolledtext, filedialog, messagebox
@@ -36,9 +32,6 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 SCRIPT_STEM = Path(__file__).stem or '17'
 
 
-# =================================================================
-#  ADMIN / ELEVATION
-# =================================================================
 _shell_execute = ctypes.windll.shell32.ShellExecuteW
 _shell_execute.restype = ctypes.c_ssize_t
 SW_SHOWNORMAL = 1
@@ -53,7 +46,6 @@ def is_admin() -> bool:
 
 
 def _request_elevation() -> bool:
-    """Kendini 'runas' ile yeniden baslatir. Basarisizsa OSError."""
     executable = sys.executable
     if getattr(sys, 'frozen', False):
         params = ' '.join(f'"{a}"' for a in sys.argv[1:])
@@ -68,7 +60,6 @@ def _request_elevation() -> bool:
 
 
 def _show_admin_prompt(parent) -> str:
-    """3 secenekli modal dialog. Donen: 'elevate' | 'continue' | 'exit'."""
     dialog = tk.Toplevel(parent)
     dialog.title('Administrator Privileges Recommended')
     dialog.resizable(False, False)
@@ -122,9 +113,6 @@ def _show_admin_prompt(parent) -> str:
     return result['value']
 
 
-# =================================================================
-#  YARDIMCILAR
-# =================================================================
 def find_desktop():
     try:
         class GUID(ctypes.Structure):
@@ -188,9 +176,6 @@ PROCMON_PROC_HOT = (
 )
 
 
-# =================================================================
-#  UEVENT
-# =================================================================
 class UEvent:
     __slots__ = ('ts', 'source', 'etype', 'pid', 'details', 'level', 'raw')
     def __init__(self, source, etype, details, pid=None, level='info', raw=None):
@@ -206,9 +191,6 @@ class UEvent:
                 f'[{self.source}] [{self.etype}] {self.details}')
 
 
-# =================================================================
-#  1. PROCMON
-# =================================================================
 class ProcMonCollector(threading.Thread):
     def __init__(self, emit, base_dir):
         super().__init__(daemon=True)
@@ -401,9 +383,6 @@ class ProcMonCollector(threading.Thread):
         self.running = False
 
 
-# =================================================================
-#  2. ETW
-# =================================================================
 class ETWCollector(threading.Thread):
     KERNEL_REGISTRY = '{70EB4F03-C1DE-4F73-A051-33D13D541355}'
     KERNEL_FILE = '{EDD08927-9CC4-4E65-B970-C2560FB5C289}'
@@ -507,9 +486,6 @@ class ETWCollector(threading.Thread):
         self.running = False
 
 
-# =================================================================
-#  3. WMI
-# =================================================================
 class WMICollector(threading.Thread):
     def __init__(self, emit):
         super().__init__(daemon=True)
@@ -611,9 +587,6 @@ class WMICollector(threading.Thread):
         self.running = False
 
 
-# =================================================================
-#  4. PSUTIL
-# =================================================================
 class PSUtilCollector(threading.Thread):
     TARGETS = ('photos.exe', 'runtimebroker.exe', 'dllhost.exe',
                'shellexperiencehost.exe', 'explorer.exe', 'sihost.exe',
@@ -672,9 +645,6 @@ class PSUtilCollector(threading.Thread):
         self.running = False
 
 
-# =================================================================
-#  5. WIN32 (EventLog)
-# =================================================================
 class Win32Collector(threading.Thread):
     def __init__(self, emit):
         super().__init__(daemon=True)
@@ -798,9 +768,6 @@ class Win32Collector(threading.Thread):
         self.running = False
 
 
-# =================================================================
-#  6. UNIFIED TRACER
-# =================================================================
 class UnifiedTracer:
     def __init__(self, emit):
         self.emit = emit
@@ -876,9 +843,6 @@ class UnifiedTracer:
             f'{datetime.now() - self.start_time}', level='error'))
 
 
-# =================================================================
-#  GUI
-# =================================================================
 class App:
     SOURCES = {
         'ProcMon': {'label': 'ProcMon', 'color': '#ff9f43'},
@@ -1292,9 +1256,6 @@ class App:
         self.txt.delete('1.0', 'end')
 
 
-# =================================================================
-#  MAIN
-# =================================================================
 def main():
     root = tk.Tk()
     root.withdraw()

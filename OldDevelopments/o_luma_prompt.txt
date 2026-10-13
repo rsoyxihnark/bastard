@@ -9,7 +9,7 @@ PowerShell aracılığıyla WinRT probe.
 Windows kullanıcısının tweak'lerle bozduğu bir uygulamayı teşhis eden
 bir "olay yeri inceleme" aracı yaz. Kullanıcı bir repro adımı yapar
 (örnek: Microsoft Photos'ta "Set as → Wallpaper" tıklar ve hiçbir şey
-olmaz — hata çıkmaz, crash yok). Araç o pencerede ne olduğunu ve ne
+olmaz: hata çıkmaz, crash yok). Araç o pencerede ne olduğunu ve ne
 OLMADIĞINI kanıtla gösterir.
 
 Bu bir log viewer değil. Bu, başarısız denemeyi milisaniye
@@ -18,7 +18,7 @@ sorusunun cevabını tek raporda, kronolojik, filtrelenebilir görmek
 ister. Pasif bekçi değil, aktif avcı.
 
 ================================================================
-1. TESLİM FORMATI — TARTIŞMASIZ KURALLAR
+1. TESLİM FORMATI: TARTIŞMASIZ KURALLAR
 ================================================================
 
 - TEK DOSYA. Kullanıcıya .pyw, klasör, kurulum, birden fazla dosya
@@ -36,7 +36,7 @@ ister. Pasif bekçi değil, aktif avcı.
   etmek, hiç teslim etmemekten kötüdür.
 
 ================================================================
-2. CAPTURE KAYNAKLARI — HEPSİ ZORUNLU, ON TANE
+2. CAPTURE KAYNAKLARI: HEPSİ ZORUNLU, ON TANE
 ================================================================
 
 Aşağıdaki kaynakların HEPSİNİ kullan. Biri diğerinin yerine
@@ -55,7 +55,7 @@ diğerleri DEVAM EDER, "ready" mesajı yayar ve hata görünür kalır.
       path (wallpaper, theme, photos, runtimebroker, shell,
       personalization, transcoded)
 
-[B] ETW — ÜÇ YOL, ÜÇÜNÜ DE DENE
+[B] ETW: ÜÇ YOL, ÜÇÜNÜ DE DENE
     [B1] pywintrace (birincil)
          - Kernel-Registry {70EB4F03-C1DE-4F73-A051-33D13D541355}
          - Kernel-File     {EDD08927-9CC4-4E65-B970-C2560FB5C289}
@@ -106,13 +106,13 @@ diğerleri DEVAM EDER, "ready" mesajı yayar ve hata görünür kalır.
         %APPDATA%\Microsoft\Windows\Themes\CachedFiles
     - Dosya oluşturma / silme / değişiklik olaylarını yakala
 
-[F] SETWINDOWSHOOKEX — Win32 API HOOK
+[F] SETWINDOWSHOOKEX (Win32 API HOOK)
     - WH_CALLWNDPROCRET ile in-process pencere aktivasyonu
     - SetWindowsHookExW.restype = c_void_p
     - SetWindowsHookExW.argtypes = [c_int, HOOKPROC, c_void_p, c_uint]
     - hMod = None (in-process), dwThreadId = 0
     - HookProc referansını sakla (GC olmasın)
-    - Yakalanan: WM_ACTIVATE, WM_ACTIVATEAPP — pencere class ve title
+    - Yakalanan: WM_ACTIVATE, WM_ACTIVATEAPP (pencere class ve title)
     - Global hook için DLL gerekir, onu DENEME. In-process yeterli.
 
 [G] WIN32 API PROBE (hook değil, aktif çağrı)
@@ -121,8 +121,8 @@ diğerleri DEVAM EDER, "ready" mesajı yayar ve hata görünür kalır.
     - ctypes.windll.user32.SystemParametersInfoW(
         SPI_SETDESKWALLPAPER, 0, <path>, SPIF_UPDATEINIFILE | SPIF_SENDCHANGE)
       ile test yazımı yap. Başarısızsa GetLastError oku, logla.
-    - ctypes.windll.shell32.IsUserAnAdmin() — admin kontrolü
-    - ctypes.windll.shell32.ShellExecuteW — elevation
+    - ctypes.windll.shell32.IsUserAnAdmin(): admin kontrolü
+    - ctypes.windll.shell32.ShellExecuteW: elevation
 
 [H] PYWIN32 EVENT LOG
     - win32evtlog.OpenEventLog + ReadEventLog ile canlı takip
@@ -164,7 +164,7 @@ diğerleri DEVAM EDER, "ready" mesajı yayar ve hata görünür kalır.
       (Name, Status, Version, PackageFullName)
 
 ================================================================
-3. AKTİF TEŞHİS PROBLARI — PASİF BEKLEME
+3. AKTİF TEŞHİS PROBLARI (PASİF BEKLEME DEĞİL)
 ================================================================
 
 Trace başlar başlamaz otomatik çalışacak problar. Her prob sonucu
@@ -227,7 +227,7 @@ E. IFEO TARAMASI (Image File Execution Options)
     - Debugger değeri varsa KIRMIZI (exe başka bir exe'ye
       yönlendiriliyor)
     - MitigationOptions değeri var ve (değer & (1 << 32)) != 0 ise
-      MEDIUM (BlockNonMicrosoftBinaries — üçüncü parti DLL'leri
+      MEDIUM (BlockNonMicrosoftBinaries: üçüncü parti DLL'leri
       bloklar)
 
 F. SHELL VERB KONTROLÜ
@@ -264,7 +264,7 @@ K. EXPLORER POLICY İPUÇLARI
     düş (legacy, modern wallpaper genelde yok sayar).
 
 ================================================================
-4. ANALİZ KATMANI — GELEN VERİYİ SÜZME
+4. ANALİZ KATMANI: GELEN VERİYİ SÜZME
 ================================================================
 
 Tüm kaynaklardan gelen olaylar bir UEvent yapısına düşsün:
@@ -336,7 +336,7 @@ Seviye atama:
   çevirme. Uzunluğu ve nonprint oranına göre özetle.
 
 ================================================================
-6. RAPORLAMA SÖZLEŞMESİ — NE GÖSTERİLMELİ
+6. RAPORLAMA SÖZLEŞMESİ: NE GÖSTERİLMELİ
 ================================================================
 
 Kullanıcı trace'i başlatır, sorunu tekrar üretir, marker'a
@@ -361,11 +361,11 @@ Rapor: severity sırasına göre sıralı, her bulgu kaynağı ile
 birlikte. JSON + CSV export.
 
 ================================================================
-7. UI — SADECE FONKSİYONEL GEREKSİNİMLER
+7. UI: SADECE FONKSİYONEL GEREKSİNİMLER
 ================================================================
 
 UI tasarımına dair HİÇBİR DAYATMA YOK. Tkinter, PyQt,
-CustomTkinter, DearPyGui — hangisi işini görüyorsa. Renkler,
+CustomTkinter, DearPyGui, hangisi işini görüyorsa. Renkler,
 fontlar, layout, ikonlar senin kararın. Ama aşağıdaki
 FONKSİYONEL sonuçlar zorunlu:
 
@@ -401,7 +401,7 @@ FONKSİYONEL sonuçlar zorunlu:
 UI çirkin olabilir. Anlaşılmaz olmasın.
 
 ================================================================
-8. TEST KONTROL LİSTESİ — TESLİM ÖNCESİ KENDİNE SOR
+8. TEST KONTROL LİSTESİ: TESLİM ÖNCESİ KENDİNE SOR
 ================================================================
 
 1. python -m py_compile NN.pyw geçiyor mu? Geçmiyorsa teslim

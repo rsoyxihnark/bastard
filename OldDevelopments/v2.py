@@ -1,7 +1,3 @@
-#!/usr/bin/env pythonw
-# olayyeri_v2.pyw - Unified Windows Trace Toolkit
-# Ahtapot: ProcMon + ETW + WMI + psutil + pywin32 + Win32 hooks
-# Tek tepside kronolojik birlesik event stream.
 
 import tkinter as tk
 from tkinter import ttk, scrolledtext, filedialog, messagebox
@@ -10,7 +6,6 @@ import json, hashlib, ctypes
 from datetime import datetime
 from pathlib import Path
 
-# ---------- Opsiyonel bagimliliklar ----------
 HAVE_PSUTIL = HAVE_WMI = HAVE_WIN32 = HAVE_ETW = HAVE_PROCMON_PARSER = False
 
 try:
@@ -41,26 +36,21 @@ for cand in ('Procmon64.exe', 'Procmon.exe', 'procmon64.exe', 'procmon.exe'):
     if os.path.exists(p):
         PROCMON_EXE = p; break
 
-# ---------- Birlesik Event ----------
 class UEvent:
     __slots__ = ('ts','source','etype','pid','details','level','raw')
     def __init__(self, source, etype, details, pid=None, level='info', raw=None):
         self.ts = datetime.now()
-        self.source = source      # ProcMon | ETW | WMI | psutil | Win32 | EvtLog
-        self.etype  = etype       # Process | Registry | File | Network | Hook | Log | Error
+        self.source = source
+        self.etype  = etype
         self.pid    = pid
         self.details= details
-        self.level  = level       # info | warn | error | change
+        self.level  = level
         self.raw    = raw
     def __repr__(self):
         return f'[{self.ts.strftime("%H:%M:%S.%f")[:-3]}] [{self.source}/{self.etype}] {self.details}'
 
 
-# =================================================================
-#  1. PROCMON COLLECTOR
-# =================================================================
 class ProcMonCollector(threading.Thread):
-    """ProcMon'u /BackingFile ile baslatir, PML dosyasini periyodik okur."""
     def __init__(self, emit, base_dir):
         super().__init__(daemon=True)
         self.emit = emit
@@ -80,7 +70,6 @@ class ProcMonCollector(threading.Thread):
             self.emit(UEvent('ProcMon','Error',
                 'procmon-parser yok. "pip install procmon-parser"', level='error'))
             return
-        # Baslat
         try:
             if os.path.exists(self.pml_path):
                 os.remove(self.pml_path)
@@ -96,7 +85,6 @@ class ProcMonCollector(threading.Thread):
             return
 
         self.running = True
-        # PML'i periyodik oku
         while self.running:
             time.sleep(2.5)
             try:
@@ -104,7 +92,6 @@ class ProcMonCollector(threading.Thread):
             except Exception as e:
                 self.emit(UEvent('ProcMon','Error', f'PML okuma hatasi: {e}', level='error'))
 
-        # Durdur
         try:
             if self.proc and self.proc.poll() is None:
                 subprocess.run(['taskkill','/F','/PID',str(self.proc.pid)],
@@ -119,7 +106,6 @@ class ProcMonCollector(threading.Thread):
             with open(self.pml_path, 'rb') as f:
                 reader = ProcmonLogsReader(f)
                 for ev in reader:
-                    # Her event'ten bir hash uret (tekrarini engelle)
                     key = (ev.process_name, ev.pid, ev.operation,
                            str(ev.path), ev.result, str(ev.time_of_day))
                     h = hash(key)
@@ -139,7 +125,7 @@ class ProcMonCollector(threading.Thread):
                             f'{ev.operation} {ev.path} -> {ev.result}',
                             pid=ev.pid, level='change'))
         except Exception:
-            pass  # PML hala yaziliyor olabilir
+            pass
 
     @staticmethod
     def _is_denied(result):
@@ -168,12 +154,7 @@ class ProcMonCollector(threading.Thread):
                 pass
 
 
-# =================================================================
-#  2. ETW COLLECTOR (pywintrace)
-# =================================================================
 class ETWCollector(threading.Thread):
-    """Microsoft-Windows-Kernel-Registry + Kernel-File ETW oturumlarini dinler."""
-    # Bilinen Provider GUID'leri
     KERNEL_REGISTRY = '{70EB4F03-C1DE-4F73-A051-33D13D541355}'
     KERNEL_FILE     = '{EDD08927-9CC4-4E65-B970-C2560FB5C289}'
     SHELL_CORE      = '{30336ED4-E327-447C-9DE0-51B2E6059F02}'
@@ -232,7 +213,6 @@ class ETWCollector(threading.Thread):
             pid = getattr(event, 'process_id', None)
             payload = getattr(event, 'payload', None)
 
-            # Payload'dan anlamli alanlar cikar
             details_parts = []
             if payload:
                 if isinstance(payload, dict):
@@ -251,7 +231,7 @@ class ETWCollector(threading.Thread):
             if ('denied' in low or 'erişim engellendi' in low
                     or '0x80070005' in low or 'access_denied' in low):
                 level = 'error'
-            elif eid in (1, 2, 3, 11, 12, 13):  # registry/file create/write
+            elif eid in (1, 2, 3, 11, 12, 13):
                 level = 'change'
 
             self.emit(UEvent('ETW', 'Registry' if 'registry' in provider.lower() else 'File',
@@ -263,11 +243,7 @@ class ETWCollector(threading.Thread):
         self.running = False
 
 
-# =================================================================
-#  3. WMI COLLECTOR
-# =================================================================
 class WMICollector(threading.Thread):
-    """WMI ile process olusturma + registry degisikligi olaylari."""
     def __init__(self, emit):
         super().__init__(daemon=True)
         self.emit = emit
@@ -284,7 +260,6 @@ class WMICollector(threading.Thread):
             self.emit(UEvent('WMI','Error', f'WMI baglanamadi: {e}', level='error'))
             return
 
-        # Process creation
         try:
             pw = c.Win32_Process.watch_for('creation')
             self.watchers.append(('process', pw))
@@ -292,7 +267,6 @@ class WMICollector(threading.Thread):
         except Exception as e:
             self.emit(UEvent('WMI','Error', f'Process watcher: {e}', level='error'))
 
-        # Registry degisikligi (duvar kagidi ile ilgili keyler)
         reg_keys = [
             ('HKEY_CURRENT_USER', r'Control Panel\Desktop', 'WallPaper'),
             ('HKEY_CURRENT_USER', r'Control Panel\Desktop', 'WallpaperStyle'),
@@ -342,18 +316,13 @@ class WMICollector(threading.Thread):
                         f'{getattr(ev, "ValueName", "")} = {getattr(ev, "NewValue", "?")}',
                         level='change'))
             except Exception:
-                # timeout veya COM hatasi -> devam
                 time.sleep(0.5)
 
     def stop(self):
         self.running = False
 
 
-# =================================================================
-#  4. PSUTIL COLLECTOR
-# =================================================================
 class PSUtilCollector(threading.Thread):
-    """psutil ile process yasam dongusu + sistem kaynaklari."""
     TARGETS = ('photos.exe','runtimebroker.exe','dllhost.exe',
                'shellexperiencehost.exe','explorer.exe','sihost.exe',
                'startmenuexperiencehost.exe','searchhost.exe',
@@ -368,7 +337,6 @@ class PSUtilCollector(threading.Thread):
         if not HAVE_PSUTIL:
             self.emit(UEvent('psutil','Error','psutil yok. "pip install psutil"', level='error'))
             return
-        # Mevcut hedef processleri raporla
         for p in psutil.process_iter(['pid','name','exe','cmdline','ppid']):
             try:
                 n = (p.info.get('name') or '').lower()
@@ -401,7 +369,6 @@ class PSUtilCollector(threading.Thread):
                     except Exception: pass
             except Exception: pass
 
-            # periyodik hedef process durum kontrolu
             try:
                 for p in psutil.process_iter(['pid','name','status','cpu_percent','memory_info']):
                     try:
@@ -414,17 +381,13 @@ class PSUtilCollector(threading.Thread):
                                 pid=p.pid, level='info'))
                     except Exception: pass
             except Exception: pass
-            time.sleep(4.0)  # durum raporu 4 sn'de bir
+            time.sleep(4.0)
 
     def stop(self):
         self.running = False
 
 
-# =================================================================
-#  5. WIN32 COLLECTOR (EventLog + API Hooks)
-# =================================================================
 class Win32Collector(threading.Thread):
-    """EventLog okuma + basit Win32 API hook'lari (SetWindowsHookEx)."""
     def __init__(self, emit):
         super().__init__(daemon=True)
         self.emit = emit
@@ -433,10 +396,8 @@ class Win32Collector(threading.Thread):
 
     def run(self):
         self.running = True
-        # EventLog tarayici
         t_evt = threading.Thread(target=self._eventlog_loop, daemon=True)
         t_evt.start()
-        # Win32 hook ornegi (WH_CALLWNDPROCRET - pencere mesajlari)
         if HAVE_WIN32:
             try:
                 self._install_hook()
@@ -449,10 +410,8 @@ class Win32Collector(threading.Thread):
         if not HAVE_WIN32:
             self.emit(UEvent('Win32','Error','pywin32 yok. "pip install pywin32"', level='error'))
             return
-        # Son okunan kayit numaralarini takip et
         last_records = {}
         channels = ('Application', 'System')
-        # ilk gecis: sadece son 20 kaydi al
         for ch in channels:
             try:
                 h = win32evtlog.OpenEventLog(None, ch)
@@ -478,7 +437,6 @@ class Win32Collector(threading.Thread):
                     for ev in evs:
                         if ev.RecordNumber <= last: continue
                         maxrec = max(maxrec, ev.RecordNumber)
-                        # Sadece Error(1)/Warning(2) seviyelerini al
                         etype = ev.EventType
                         if etype not in (win32con.EVENTLOG_ERROR_TYPE,
                                          win32con.EVENTLOG_WARNING_TYPE):
@@ -496,10 +454,6 @@ class Win32Collector(threading.Thread):
                     except Exception: pass
 
     def _install_hook(self):
-        """WH_CALLWNDPROCRET ile ust seviye pencere mesaji hook'u.
-        Not: Bu hook kendi process'imizdeki mesajlari gorur.
-        Diger processleri izlemek icin DLL injection gerekir (Win32 sinirlari).
-        Yine de shell/pencere degisikliklerini yakalamak icin faydali."""
         WH_CALLWNDPROCRET = 12
         user32 = ctypes.windll.user32
         kernel32 = ctypes.windll.kernel32
@@ -511,7 +465,7 @@ class Win32Collector(threading.Thread):
         emit = self.emit
 
         def _proc(nCode, wParam, lParam):
-            if nCode >= 0 and wParam in (0x0006, 0x001C):  # WM_ACTIVATE, WM_ACTIVATEAPP
+            if nCode >= 0 and wParam in (0x0006, 0x001C):
                 try:
                     hwnd = ctypes.cast(lParam, ctypes.POINTER(ctypes.c_ulonglong))[0]
                     class_buf = ctypes.create_unicode_buffer(256)
@@ -526,7 +480,7 @@ class Win32Collector(threading.Thread):
             return user32.CallNextHookEx(None, nCode, wParam, lParam)
 
         cb = HOOKPROC(_proc)
-        self._hook_ref = cb  # referansi tut, GC olmasin
+        self._hook_ref = cb
         h = user32.SetWindowsHookExW(WH_CALLWNDPROCRET, cb,
                                      kernel32.GetModuleHandleW(None), 0)
         if h:
@@ -544,9 +498,6 @@ class Win32Collector(threading.Thread):
                 except Exception: pass
 
 
-# =================================================================
-#  6. ANA TRACER - Tum collector'lari yonetir
-# =================================================================
 class UnifiedTracer:
     def __init__(self, emit):
         self.emit = emit
@@ -559,7 +510,6 @@ class UnifiedTracer:
         self.running = True
         self.start_time = datetime.now()
 
-        # Eksik bagimliliklari uyar
         missing = []
         if not HAVE_PSUTIL: missing.append('psutil')
         if not HAVE_WMI: missing.append('wmi')
@@ -576,7 +526,6 @@ class UnifiedTracer:
         self.emit(UEvent('System','Process',
             f'=== BIRLESIK TRACE BASLADI === {self.start_time}', level='info'))
 
-        # Tum collector'lari baslat
         collectors = []
         if PROCMON_EXE and HAVE_PROCMON_PARSER:
             collectors.append(ProcMonCollector(self.emit, BASE_DIR))
@@ -616,9 +565,6 @@ class UnifiedTracer:
             f'(sure: {datetime.now() - self.start_time})', level='info'))
 
 
-# =================================================================
-#  GUI
-# =================================================================
 class App:
     SOURCES = {
         'ProcMon':  {'label':'ProcMon','color':'#ff9f43'},
@@ -642,9 +588,8 @@ class App:
 
         self.queue = queue.Queue()
         self.tracer = UnifiedTracer(self._emit_u)
-        self.log = []  # (UEvent, formatted_line)
+        self.log = []
 
-        # ---- Ust Bar ----
         top = ttk.Frame(root, padding=6); top.pack(fill='x')
         self.btn_start = ttk.Button(top, text='\u25b6 Trace Baslat', command=self.start)
         self.btn_start.pack(side='left')
@@ -658,7 +603,6 @@ class App:
         self.status = ttk.Label(top, text='Hazir', foreground='gray')
         self.status.pack(side='right')
 
-        # ---- Durum cubugu (collector'lar) ----
         stat = ttk.Frame(root, padding=(6,0)); stat.pack(fill='x')
         self.collector_labels = {}
         for src, meta in self.SOURCES.items():
@@ -668,7 +612,6 @@ class App:
             lbl.pack(side='left', padx=4)
             self.collector_labels[src] = lbl
 
-        # ---- Filtre Bar ----
         filt = ttk.LabelFrame(root, text='Filtre', padding=6)
         filt.pack(fill='x', padx=6, pady=(4,0))
 
@@ -700,13 +643,11 @@ class App:
         ent.bind('<KeyRelease>', lambda e: self.refilter())
         ttk.Label(filt, text='Ara:').pack(side='left')
 
-        # ---- Log Alani ----
         wrap = ttk.Frame(root); wrap.pack(fill='both', expand=True, padx=6, pady=6)
         self.txt = scrolledtext.ScrolledText(
             wrap, wrap='none', font=('Consolas', 9),
             bg='#0d0d12', fg='#dcdcdc', insertbackground='white')
         self.txt.pack(fill='both', expand=True)
-        # Renk tag'leri
         for src, meta in self.SOURCES.items():
             self.txt.tag_config(f'src_{src}', foreground=meta['color'])
         for et, col in self.ETYPES.items():
@@ -718,7 +659,6 @@ class App:
 
         root.after(60, self._drain)
 
-    # ---- Event emit ----
     def _emit_u(self, uevent):
         self.queue.put(uevent)
 
@@ -729,7 +669,6 @@ class App:
                 self.log.append(ev)
                 if self._passes(ev):
                     self._write_event(ev)
-                # Collector durum isigi
                 if ev.source in self.collector_labels:
                     self.collector_labels[ev.source].config(fg='green')
         except queue.Empty:
@@ -756,7 +695,6 @@ class App:
         tag = 'error' if ev.level == 'error' else \
               'warn' if ev.level == 'warn' else \
               'change' if ev.level == 'change' else 'info'
-        # insert parcali (renklendirme icin)
         start = self.txt.index('end-1c')
         self.txt.insert('end', f'{ts} ', 'info')
         self.txt.insert('end', f'{src:<9} ', f'src_{ev.source}')
@@ -770,7 +708,6 @@ class App:
             if self._passes(ev):
                 self._write_event(ev)
 
-    # ---- Actions ----
     def start(self):
         threading.Thread(target=self.tracer.start, daemon=True).start()
         self.btn_start.config(state='disabled')
@@ -791,18 +728,15 @@ class App:
         def i(d): self._emit_u(UEvent('System','Process', d, level='info'))
         i('========== ON KONTROL v2 ==========')
 
-        # ProcMon varlik
         if PROCMON_EXE: i(f'ProcMon: {PROCMON_EXE}')
         else: e('ProcMon: YOK (Procmon64.exe ayni klasore koy)')
 
-        # Bagimliliklar
         for name, ok in (('psutil',HAVE_PSUTIL),('wmi',HAVE_WMI),
                          ('pywin32',HAVE_WIN32),('pywintrace',HAVE_ETW),
                          ('procmon-parser',HAVE_PROCMON_PARSER)):
             if ok: i(f'{name}: OK')
             else: e(f'{name}: YOK -> pip install {name}')
 
-        # Policy keys (duvar kagidi)
         pol = [
             ('HKCU', r'Software\Microsoft\Windows\CurrentVersion\Policies\ActiveDesktop', 'NoChangingWallPaper'),
             ('HKCU', r'Software\Microsoft\Windows\CurrentVersion\Policies\System', 'Wallpaper'),
@@ -828,7 +762,6 @@ class App:
             except OSError: pass
         if not found: i('  Politika key bulunamadi (iyi haber)')
 
-        # Servisler
         i('[Servisler]')
         if HAVE_PSUTIL:
             for svc in ('Themes','AppXSvc','ClipSVC','StateRepository',
@@ -841,7 +774,6 @@ class App:
                 except Exception as ex:
                     e(f'  >> Servis yok: {svc} ({ex})')
 
-        # TranscodedWallpaper yazilabilirlik
         i('[Wallpaper Dosya]')
         ad = os.environ.get('APPDATA','')
         wp = os.path.join(ad,'Microsoft','Windows','Themes','TranscodedWallpaper')
@@ -854,7 +786,6 @@ class App:
         else:
             i(f'  Dosya yok (normal): {wp}')
 
-        # PersonalizationCSP
         i('[PersonalizationCSP]')
         try:
             k = winreg.OpenKey(hive_map['HKLM'],

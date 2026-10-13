@@ -1,6 +1,3 @@
-#!/usr/bin/env pythonw
-# olayyeri.pyw - Olay Yeri Inceleme / TraceMon Lite
-# Windows trace/debug toolkit. Genisletmesi kolay.
 
 import tkinter as tk
 from tkinter import ttk, scrolledtext, filedialog, messagebox
@@ -22,7 +19,6 @@ try:
 except ImportError:
     HAVE_WATCHDOG = False
 
-# ---------- Sabitler ----------
 HIVES = {'HKCU': winreg.HKEY_CURRENT_USER, 'HKLM': winreg.HKEY_LOCAL_MACHINE}
 
 WATCH_REG_KEYS = [
@@ -40,7 +36,7 @@ WATCH_REG_KEYS = [
     ('HKLM', r'SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System'),
 ]
 
-NO_WINDOW = 0x08000000  # CREATE_NO_WINDOW
+NO_WINDOW = 0x08000000
 
 
 def default_watch_folders():
@@ -55,7 +51,6 @@ def default_watch_folders():
     return [f for f in cands if os.path.exists(f)]
 
 
-# ---------- Tracer ----------
 class Tracer:
     def __init__(self, emit):
         self.emit = emit
@@ -68,7 +63,6 @@ class Tracer:
         self.watch_folders = []
         self.error_count = 0
 
-    # ---- Public ----
     def start(self, folders):
         if self.running:
             return
@@ -89,7 +83,6 @@ class Tracer:
         self.proc_seen = {p.pid for p in psutil.process_iter(['pid'])}
         self.emit('INFO', f'Aktif process: {len(self.proc_seen)}', 'info')
 
-        # mevcut ilgili processleri de raporla
         for name in ('Photos.exe', 'RuntimeBroker.exe', 'dllhost.exe',
                      'ShellExperienceHost.exe', 'explorer.exe'):
             for p in psutil.process_iter(['pid', 'name']):
@@ -118,17 +111,14 @@ class Tracer:
             except Exception:
                 pass
             self.observer = None
-        # son diff
         try:
             final = self._read_registry_all()
             self._diff_registry(self.reg_snapshot, final)
         except Exception as e:
             self.emit('ERR', f'Son registry diff hatasi: {e}', 'error')
-        # event log tarama
         self._scan_event_log()
         self.emit('INFO', f'Trace bitti: {datetime.now()} | Toplam hata: {self.error_count}', 'info')
 
-    # ---- Registry ----
     def _read_registry_all(self):
         out = {}
         for hive_name, base in WATCH_REG_KEYS:
@@ -191,7 +181,6 @@ class Tracer:
             if k not in new:
                 self.emit('REG-', f'{k} silindi (eski: {v[1]})', 'change')
 
-    # ---- Process ----
     def _watch_processes(self):
         while self.running:
             time.sleep(0.4)
@@ -209,7 +198,6 @@ class Tracer:
             except Exception:
                 pass
 
-    # ---- File ----
     def _start_file_watcher(self):
         outer = self
 
@@ -234,7 +222,6 @@ class Tracer:
         except Exception as e:
             self.emit('ERR', f'Watchdog baslatilamadi: {e}', 'error')
 
-    # ---- Event Log ----
     def _scan_event_log(self):
         import xml.etree.ElementTree as ET
         ns = {'e': 'http://schemas.microsoft.com/win/2004/08/events/event'}
@@ -297,11 +284,9 @@ class Tracer:
                            '0x80070005' in low:
                             self.emit('EVT', '    >>> ERISIM ENGELLENDI IPUCU <<<', 'error')
 
-    # ---- Pre-check ----
     def run_precheck(self):
         self.emit('INFO', '========== ON KONTROL ==========', 'info')
 
-        # 1) Photos AppX
         try:
             ps = ("Get-AppxPackage Microsoft.Windows.Photos | "
                   "Select-Object Name,Version,Status,InstallLocation | Format-List | Out-String")
@@ -313,7 +298,6 @@ class Tracer:
         except Exception as e:
             self.emit('WARN', f'AppX sorgu hatasi: {e}', 'error')
 
-        # 2) Policy keys
         pol = [
             ('HKCU', r'Software\Microsoft\Windows\CurrentVersion\Policies\ActiveDesktop', 'NoChangingWallPaper'),
             ('HKCU', r'Software\Microsoft\Windows\CurrentVersion\Policies\System', 'Wallpaper'),
@@ -339,7 +323,6 @@ class Tracer:
         if not found_policy:
             self.emit('INFO', '  Politika key bulunamadi (iyi haber)', 'info')
 
-        # 3) Servisler
         self.emit('INFO', '[Servis Kontrolu]', 'info')
         for svc in ('Themes', 'AppXSvc', 'ClipSVC', 'StateRepository', 'TokenBroker', 'Dwm', 'UxSms'):
             try:
@@ -354,7 +337,6 @@ class Tracer:
             except Exception as e:
                 self.emit('WARN', f'  >> Servis erisilemedi: {svc} ({e})', 'error')
 
-        # 4) TranscodedWallpaper yazilabilirlik
         self.emit('INFO', '[Wallpaper Dosya Kontrolu]', 'info')
         ad = os.environ.get('APPDATA', '')
         wp = os.path.join(ad, 'Microsoft', 'Windows', 'Themes', 'TranscodedWallpaper')
@@ -368,7 +350,6 @@ class Tracer:
         else:
             self.emit('WARN', f'  Dosya yok: {wp}', 'error')
 
-        # 5) Registry ACL
         self.emit('INFO', '[Registry ACL]', 'info')
         try:
             ps = r'(Get-Acl "HKCU:\Control Panel\Desktop").Access | Format-Table IdentityReference,RegistryRights,AccessControlType -AutoSize | Out-String'
@@ -385,7 +366,6 @@ class Tracer:
         self.emit('INFO', '========== ON KONTROL BITTI ==========', 'info')
 
 
-# ---------- GUI ----------
 class App:
     def __init__(self, root):
         self.root = root
@@ -396,7 +376,6 @@ class App:
         self.tracer = Tracer(self._emit)
         self.log_lines = []
 
-        # Ust bar
         top = ttk.Frame(root, padding=6)
         top.pack(fill='x')
         self.btn_start = ttk.Button(top, text='\u25b6 Trace Baslat', command=self.start)
@@ -409,7 +388,6 @@ class App:
         self.status = ttk.Label(top, text='Hazir', foreground='gray')
         self.status.pack(side='right')
 
-        # Filtre
         filt = ttk.Frame(root, padding=(6, 0))
         filt.pack(fill='x')
         self.f_proc = tk.BooleanVar(value=True)
@@ -425,7 +403,6 @@ class App:
         ttk.Checkbutton(filt, text='Sadece Hata', variable=self.f_err_only,
                         command=self.refilter).pack(side='left', padx=(20, 0))
 
-        # Log alani
         wrap_frame = ttk.Frame(root)
         wrap_frame.pack(fill='both', expand=True, padx=6, pady=6)
         self.txt = scrolledtext.ScrolledText(wrap_frame, wrap='none',
@@ -444,7 +421,6 @@ class App:
         if not HAVE_WATCHDOG:
             self._emit('INFO', 'watchdog yok: dosya izleme devre disi. "pip install watchdog"', 'error')
 
-    # ---- callbacks ----
     def _emit(self, kind, msg, level='info'):
         ts = datetime.now().strftime('%H:%M:%S.%f')[:-3]
         line = f'[{ts}] [{kind}] {msg}'
@@ -486,7 +462,6 @@ class App:
             if self._passes_filter(kind, level):
                 self._write(line, level)
 
-    # ---- actions ----
     def start(self):
         folders = default_watch_folders()
         threading.Thread(target=self.tracer.start, args=(folders,), daemon=True).start()

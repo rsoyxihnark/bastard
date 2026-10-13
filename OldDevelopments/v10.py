@@ -1,11 +1,3 @@
-#!/usr/bin/env python
-# 19.py - Bastard v5 Unified Trace Toolkit
-# v5 degisiklikleri:
-#  - Pencere boyutu: ekrana gore otomatik + config.json'a kayit + Reset buton
-#  - Acilista App(root) gizliyken olusturulur, sonra deiconify (siyah ekran fix)
-#  - Startup logger: DESKTOP/19_startup.log her acilista yazilir
-#  - EvtLog / tum collector etiketleri ilk event'te yesile doner
-#  - Uncaught exception handler
 
 import tkinter as tk
 from tkinter import ttk, scrolledtext, filedialog, messagebox
@@ -47,9 +39,6 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 SCRIPT_STEM = Path(__file__).stem or '19'
 
 
-# =================================================================
-#  STARTUP LOGGER
-# =================================================================
 def _find_desktop_early():
     try:
         up = Path(os.environ.get('USERPROFILE', str(Path.home())))
@@ -62,7 +51,6 @@ def _find_desktop_early():
 _DESKTOP_EARLY = _find_desktop_early()
 
 def _startup_log(msg):
-    """Her acilista Desktop'a yazilir. Trace baslamasa bile calisir."""
     try:
         p = _DESKTOP_EARLY / f'{SCRIPT_STEM}_startup.log'
         with open(p, 'a', encoding='utf-8') as f:
@@ -88,9 +76,6 @@ _startup_log(f'{SCRIPT_STEM} boot: python={sys.version.split()[0]}, '
 _install_excepthook()
 
 
-# =================================================================
-#  CONFIG (pencere boyutu)
-# =================================================================
 CONFIG_PATH = (Path(os.environ.get('LOCALAPPDATA', str(Path.home())))
                / 'Bastard' / 'config.json')
 
@@ -110,9 +95,6 @@ def save_config(cfg):
         _startup_log(f'config save error: {e}')
 
 
-# =================================================================
-#  ADMIN / ELEVATION
-# =================================================================
 _shell_execute = ctypes.windll.shell32.ShellExecuteW
 _shell_execute.restype = ctypes.c_ssize_t
 SW_SHOWNORMAL = 1
@@ -170,9 +152,6 @@ def _show_admin_prompt(parent) -> str:
     return result['value']
 
 
-# =================================================================
-#  YARDIMCILAR
-# =================================================================
 def find_desktop():
     try:
         class GUID(ctypes.Structure):
@@ -273,9 +252,6 @@ class UEvent:
                 f'[{self.source}] [{self.etype}] {self.details}')
 
 
-# =================================================================
-#  REGISTRY POLLER
-# =================================================================
 class RegistryPoller(threading.Thread):
     def __init__(self, emit, interval=0.5):
         super().__init__(daemon=True)
@@ -359,9 +335,6 @@ class RegistryPoller(threading.Thread):
         self.running = False
 
 
-# =================================================================
-#  FILE WATCH
-# =================================================================
 class FileWatchCollector(threading.Thread):
     def __init__(self, emit):
         super().__init__(daemon=True)
@@ -415,9 +388,6 @@ class FileWatchCollector(threading.Thread):
         self.running = False
 
 
-# =================================================================
-#  PROCMON
-# =================================================================
 class ProcMonCollector(threading.Thread):
     def __init__(self, emit, base_dir):
         super().__init__(daemon=True)
@@ -595,9 +565,6 @@ class ProcMonCollector(threading.Thread):
         self.running = False
 
 
-# =================================================================
-#  ETW
-# =================================================================
 class ETWCollector(threading.Thread):
     KERNEL_REGISTRY = '{70EB4F03-C1DE-4F73-A051-33D13D541355}'
     KERNEL_FILE = '{EDD08927-9CC4-4E65-B970-C2560FB5C289}'
@@ -697,9 +664,6 @@ class ETWCollector(threading.Thread):
         self.running = False
 
 
-# =================================================================
-#  WMI
-# =================================================================
 class WMICollector(threading.Thread):
     def __init__(self, emit):
         super().__init__(daemon=True)
@@ -770,9 +734,6 @@ class WMICollector(threading.Thread):
         self.running = False
 
 
-# =================================================================
-#  PSUTIL
-# =================================================================
 class PSUtilCollector(threading.Thread):
     TARGETS = ('photos.exe', 'runtimebroker.exe', 'dllhost.exe',
                'shellexperiencehost.exe', 'explorer.exe', 'sihost.exe',
@@ -829,9 +790,6 @@ class PSUtilCollector(threading.Thread):
         self.running = False
 
 
-# =================================================================
-#  WIN32 / EVENTLOG
-# =================================================================
 class Win32Collector(threading.Thread):
     def __init__(self, emit):
         super().__init__(daemon=True)
@@ -947,9 +905,6 @@ class Win32Collector(threading.Thread):
         self.running = False
 
 
-# =================================================================
-#  UNIFIED TRACER
-# =================================================================
 class UnifiedTracer:
     def __init__(self, emit):
         self.emit = emit
@@ -1016,9 +971,6 @@ class UnifiedTracer:
             f'{datetime.now() - self.start_time}', level='error'))
 
 
-# =================================================================
-#  GUI
-# =================================================================
 class App:
     SOURCES = {
         'RegPoll':   {'label': 'RegPoll', 'color': '#f0c060'},
@@ -1042,7 +994,6 @@ class App:
         self.root = root
         root.title(f'Bastard v5 ({SCRIPT_STEM})')
 
-        # --- Pencere boyutu: config'ten yukle veya ekrana sigdir ---
         cfg = load_config()
         saved = cfg.get('window_geometry')
         if saved:
@@ -1249,7 +1200,6 @@ class App:
                 self.log.append(ev)
                 self._write_live(ev)
                 if self._passes(ev): self._write_event(ev)
-                # >>> FIX: hata alsa bile yesile don <<<
                 if ev.source in self.collector_labels:
                     self.collector_labels[ev.source].config(fg='green')
         except queue.Empty:
@@ -1504,7 +1454,6 @@ def main():
             root.destroy()
             return 0
 
-    # >>> FIX: App'i gizliyken olustur, widget'lar hazir olunca goster <<<
     _startup_log('creating App (root still hidden)')
     app = App(root)
     _startup_log('App created, calling update_idletasks')

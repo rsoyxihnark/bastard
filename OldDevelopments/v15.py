@@ -1,7 +1,3 @@
-#!/usr/bin/env python
-# 24.py - Bastard v10
-# v10: ETW ready event + user-mode fallback, WMI registry watchers + ready event,
-#      Photos no-action detector, ProcMon lib error suppression
 
 import tkinter as tk
 from tkinter import ttk, scrolledtext, filedialog, messagebox
@@ -338,9 +334,6 @@ def do_restore_shell_verb(emit):
             emit(f'  {ext} Hata: {e}', 'error')
 
 
-# =================================================================
-#  RegistryPoller
-# =================================================================
 REG_POLL_TARGETS = [
     ('HKCU', r'Control Panel\Desktop'),
     ('HKCU', r'Software\Microsoft\Windows\CurrentVersion\Explorer\Wallpapers'),
@@ -423,9 +416,6 @@ class RegistryPoller(threading.Thread):
     def stop(self): self.running = False
 
 
-# =================================================================
-#  FileWatch
-# =================================================================
 def file_watch_targets():
     targets = []
     ad = os.environ.get('APPDATA', ''); la = os.environ.get('LOCALAPPDATA', '')
@@ -478,9 +468,6 @@ class FileWatchCollector(threading.Thread):
     def stop(self): self.running = False
 
 
-# =================================================================
-#  ProcMon
-# =================================================================
 PROCMON_PATH_KW = ('wallpaper', 'theme', 'personaliz', 'lockscreen',
                    'transcoded', 'photos', 'runtimebroker', 'immersive',
                    'control panel\\desktop', 'shell')
@@ -600,7 +587,6 @@ class ProcMonCollector(threading.Thread):
                                  getattr(ev, 'process_name', '?') or '?',
                                  getattr(ev, 'time_of_day', None))
         except (AttributeError, TypeError):
-            # PML hala yaziliyor veya partial - sessizce gec
             pass
 
     def _convert_pml_to_csv(self):
@@ -694,14 +680,9 @@ class ProcMonCollector(threading.Thread):
     def stop(self): self.running = False
 
 
-# =================================================================
-#  ETW  (v10: ready event + user-mode fallback)
-# =================================================================
 class ETWCollector(threading.Thread):
-    # Kernel providers (admin, bazi build'lerde calismaz)
     KREG = '{70EB4F03-C1DE-4F73-A051-33D13D541355}'
     KFILE = '{EDD08927-9CC4-4E65-B970-C2560FB5C289}'
-    # User-mode providers (admin gerekmez, her zaman calisir)
     SHELL_CORE = '{30336ED4-E327-447C-9DE0-51B2E6059F02}'
     IMMERSIVE = '{BC2C92D8-8DB4-4F8B-8D29-8F3A3A0BF1A4}'
     THEMES     = '{7B67BEC2-6E2F-4A68-B7E4-9D3E9A4C4C8F}'
@@ -712,14 +693,12 @@ class ETWCollector(threading.Thread):
         self.sessions = []; self.event_count = 0
 
     def run(self):
-        # >>> v10 FIX: hemen ready mesaji yolla <<<
         self.emit(UEvent('ETW', 'Process', 'ETW hazirlaniyor...', level='info'))
 
         if not HAVE_ETW:
             self.emit(UEvent('ETW', 'Error', 'pywintrace yok.', level='error'))
             return
 
-        # Once kernel providers dene
         kernel_ok = False
         if is_admin():
             kernel_ok = self._try_start('kernel',
@@ -729,12 +708,10 @@ class ETWCollector(threading.Thread):
                 'Admin degil, kernel ETW atlanip user-mode denenecek',
                 level='info'))
 
-        # Kernel calisti mi? En azindan session basladiysa ok
         if kernel_ok:
             self.emit(UEvent('ETW', 'Process',
                 'ETW KERNEL session aktif', level='info'))
         else:
-            # User-mode fallback
             self.emit(UEvent('ETW', 'Process',
                 'Kernel ETW olmadi, user-mode provider\'lar deneniyor...',
                 level='info'))
@@ -815,16 +792,12 @@ class ETWCollector(threading.Thread):
     def stop(self): self.running = False
 
 
-# =================================================================
-#  WMI  (v10: ready event + registry watchers geri)
-# =================================================================
 class WMICollector(threading.Thread):
     def __init__(self, emit):
         super().__init__(daemon=True)
         self.emit = emit; self.running = False; self.watchers = []
 
     def run(self):
-        # >>> v10 FIX: hemen ready mesaji <<<
         self.emit(UEvent('WMI', 'Process', 'WMI hazirlaniyor...', level='info'))
 
         if not HAVE_WMI:
@@ -840,7 +813,6 @@ class WMICollector(threading.Thread):
                 self.emit(UEvent('WMI', 'Error', f'baglan: {e}', level='error'))
                 return
 
-            # Process creation
             try:
                 pw = c.Win32_Process.watch_for('creation')
                 self.watchers.append(('process', pw))
@@ -850,7 +822,6 @@ class WMICollector(threading.Thread):
                 self.emit(UEvent('WMI', 'Error',
                     f'Process watcher: {e}', level='error'))
 
-            # Registry value change - proper keyword args
             reg_keys = [
                 ('HKEY_CURRENT_USER', r'Control Panel\Desktop', 'WallPaper'),
                 ('HKEY_CURRENT_USER', r'Control Panel\Desktop', 'WallpaperStyle'),
@@ -866,7 +837,6 @@ class WMICollector(threading.Thread):
                     self.watchers.append(('reg', w))
                     reg_ok += 1
                 except Exception as e:
-                    # Bu normal olabilir, WMI registry provider pasif olabilir
                     pass
             if reg_ok:
                 self.emit(UEvent('WMI', 'Process',
@@ -893,7 +863,7 @@ class WMICollector(threading.Thread):
         try:
             while self.running:
                 try:
-                    ev = watcher(timeout_ms=5000)  # v10: 3sn -> 5sn
+                    ev = watcher(timeout_ms=5000)
                     if kind == 'process':
                         pid = getattr(ev, 'ProcessId', None)
                         name = getattr(ev, 'Name', '?')
@@ -922,9 +892,6 @@ class WMICollector(threading.Thread):
     def stop(self): self.running = False
 
 
-# =================================================================
-#  psutil
-# =================================================================
 class PSUtilCollector(threading.Thread):
     TARGETS = ('photos.exe', 'runtimebroker.exe', 'dllhost.exe',
                'shellexperiencehost.exe', 'explorer.exe', 'sihost.exe',
@@ -975,9 +942,6 @@ class PSUtilCollector(threading.Thread):
     def stop(self): self.running = False
 
 
-# =================================================================
-#  Win32 / EventLog
-# =================================================================
 class Win32Collector(threading.Thread):
     def __init__(self, emit):
         super().__init__(daemon=True)
@@ -1073,12 +1037,7 @@ class Win32Collector(threading.Thread):
     def stop(self): self.running = False
 
 
-# =================================================================
-#  Photos No-Action Detector
-# =================================================================
 class PhotosNoActionDetector(threading.Thread):
-    """Marker'a basildiktan sonra N saniye icinde hicbir wallpaper event'i
-    gelmezse uyari basar. Photos'un 'Set as' butonunun bos dondugunu gosterir."""
     def __init__(self, emit, marker_event, window_s=6.0):
         super().__init__(daemon=True)
         self.emit = emit
@@ -1087,7 +1046,6 @@ class PhotosNoActionDetector(threading.Thread):
         self.running = True
 
     def notify_event(self):
-        """Her RegPoll/FileWatch event'inde cagrilir."""
         self.marker_ts = datetime.now()
 
     def run(self):
@@ -1102,9 +1060,6 @@ class PhotosNoActionDetector(threading.Thread):
                 level='error'))
 
 
-# =================================================================
-#  UnifiedTracer
-# =================================================================
 class UnifiedTracer:
     def __init__(self, emit):
         self.emit = emit; self.collectors = []; self.running = False
@@ -1170,9 +1125,6 @@ class UnifiedTracer:
             f'=== TRACE BITTI === {datetime.now() - self.start_time}', level='error'))
 
 
-# =================================================================
-#  GUI
-# =================================================================
 class App:
     SOURCES = {
         'Diag':      {'label': 'Diag', 'color': '#00d9ff'},
@@ -1402,7 +1354,6 @@ class App:
                                   foreground='#ff6b6b' if qs > 2000 else '#f0c060')
         else:
             self.queue_lbl.config(text='')
-        # Marker detector
         if self._last_marker_ts and not self._marker_action_seen:
             if datetime.now() - self._last_marker_ts > timedelta(seconds=6):
                 self._emit_u(UEvent('System', 'Marker',
@@ -1410,7 +1361,7 @@ class App:
                     'event\'i yok. Photos "Set as" bos dondu. '
                     'Cozum: Explorer sag-tik -> "Set as desktop background"',
                     level='error'))
-                self._marker_action_seen = True  # bir kez uyar
+                self._marker_action_seen = True
         self.root.after(500, self._tick)
 
     def _open_logfile(self):
@@ -1455,7 +1406,6 @@ class App:
                 if self._passes(ev): self._write_event(ev)
                 if ev.source in self.collector_labels:
                     self.collector_labels[ev.source].config(fg='green')
-                # Marker sonrasi action goruldu mu?
                 if self._last_marker_ts and not self._marker_action_seen:
                     if (ev.source in ('RegPoll', 'FileWatch', 'ProcMon', 'ETW', 'WMI')
                             and ev.etype in ('Registry', 'File')):

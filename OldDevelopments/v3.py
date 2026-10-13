@@ -1,6 +1,3 @@
-#!/usr/bin/env pythonw
-# olayyeri_v2.pyw - Unified Windows Trace Toolkit (v2.1)
-# Fixes: pythoncom CoInitialize, SetWindowsHookExW restype/hMod, live desktop log
 
 import tkinter as tk
 from tkinter import ttk, scrolledtext, filedialog, messagebox
@@ -9,7 +6,6 @@ import json, ctypes, atexit
 from datetime import datetime
 from pathlib import Path
 
-# ---------- Opsiyonel bagimliliklar ----------
 HAVE_PSUTIL = HAVE_WMI = HAVE_WIN32 = HAVE_ETW = HAVE_PROCMON_PARSER = False
 
 try:
@@ -36,7 +32,6 @@ NO_WINDOW = 0x08000000
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-# Desktop yolu (OneDrive yonlendirmesi varsa onu da dene)
 def find_desktop():
     cands = [
         Path(os.environ.get('USERPROFILE', '')) / 'Desktop',
@@ -51,13 +46,11 @@ def find_desktop():
 
 DESKTOP = find_desktop()
 
-# ProcMon exe bul (birkac yer)
 def find_procmon():
     cands = []
     for d in (BASE_DIR, str(DESKTOP), os.getcwd(), r'C:\Tools', r'C:\Sysinternals'):
         for name in ('Procmon64.exe','Procmon.exe','procmon64.exe','procmon.exe'):
             cands.append(os.path.join(d, name))
-    # PATH icinde de ara
     for name in ('Procmon64.exe','Procmon.exe'):
         p = None
         for path in os.environ.get('PATH','').split(os.pathsep):
@@ -71,7 +64,6 @@ def find_procmon():
 PROCMON_EXE = find_procmon()
 
 
-# ---------- Birlesik Event ----------
 class UEvent:
     __slots__ = ('ts','source','etype','pid','details','level','raw')
     def __init__(self, source, etype, details, pid=None, level='info', raw=None):
@@ -87,9 +79,6 @@ class UEvent:
         return f'{ts} [{self.source}] [{self.etype}] {self.details}'
 
 
-# =================================================================
-#  1. PROCMON COLLECTOR
-# =================================================================
 class ProcMonCollector(threading.Thread):
     def __init__(self, emit, base_dir):
         super().__init__(daemon=True)
@@ -110,7 +99,6 @@ class ProcMonCollector(threading.Thread):
                 level='error'))
             return
         if not HAVE_PROCMON_PARSER:
-            # parser yok ama ProcMon varsa yine calistir, PML sonra GUI ile incelenir
             self.emit(UEvent('ProcMon','Error',
                 'procmon-parser YOK. PML yazilacak ama canli parse edilemeyecek. '
                 'Kur: pip install procmon-parser  (veya ust bardan "Bagimliliklari Kur")',
@@ -132,7 +120,6 @@ class ProcMonCollector(threading.Thread):
             return
 
         if not HAVE_PROCMON_PARSER:
-            # parser yok: ProcMon calissin yeter
             self.running = True
             while self.running:
                 time.sleep(1.0)
@@ -183,7 +170,6 @@ class ProcMonCollector(threading.Thread):
                         self.emit(UEvent('ProcMon','Registry',
                             f'{op} {path} -> {res}', pid=pid, level='change'))
         except Exception:
-            # PML hala yaziliyor olabilir, sessizce gec
             pass
 
     @staticmethod
@@ -208,9 +194,6 @@ class ProcMonCollector(threading.Thread):
         self.running = False
 
 
-# =================================================================
-#  2. ETW COLLECTOR
-# =================================================================
 class ETWCollector(threading.Thread):
     KERNEL_REGISTRY = '{70EB4F03-C1DE-4F73-A051-33D13D541355}'
     KERNEL_FILE     = '{EDD08927-9CC4-4E65-B970-C2560FB5C289}'
@@ -285,9 +268,6 @@ class ETWCollector(threading.Thread):
         self.running = False
 
 
-# =================================================================
-#  3. WMI COLLECTOR  (CoInitialize fix)
-# =================================================================
 class WMICollector(threading.Thread):
     def __init__(self, emit):
         super().__init__(daemon=True)
@@ -299,7 +279,6 @@ class WMICollector(threading.Thread):
         if not HAVE_WMI:
             self.emit(UEvent('WMI','Error', 'wmi yok. Kur: pip install wmi pywin32', level='error'))
             return
-        # >>> FIX: Thread icinde COM initialize <<<
         try:
             pythoncom.CoInitialize()
         except Exception as e:
@@ -354,7 +333,6 @@ class WMICollector(threading.Thread):
             except Exception: pass
 
     def _watch_loop(self, kind, watcher):
-        # Her watcher thread'i kendi COM'unu baslatmali
         try:
             pythoncom.CoInitialize()
         except Exception: pass
@@ -384,9 +362,6 @@ class WMICollector(threading.Thread):
         self.running = False
 
 
-# =================================================================
-#  4. PSUTIL COLLECTOR
-# =================================================================
 class PSUtilCollector(threading.Thread):
     TARGETS = ('photos.exe','runtimebroker.exe','dllhost.exe',
                'shellexperiencehost.exe','explorer.exe','sihost.exe',
@@ -431,7 +406,6 @@ class PSUtilCollector(threading.Thread):
                                 pid=p.pid, level='info'))
                     except Exception: pass
             except Exception: pass
-            # periyodik Photos durum
             if time.time() - last_status_emit > 5:
                 last_status_emit = time.time()
                 for p in psutil.process_iter(['pid','name','status','memory_info']):
@@ -455,9 +429,6 @@ class PSUtilCollector(threading.Thread):
         self.running = False
 
 
-# =================================================================
-#  5. WIN32 COLLECTOR  (Hook fix)
-# =================================================================
 class Win32Collector(threading.Thread):
     def __init__(self, emit):
         super().__init__(daemon=True)
@@ -528,15 +499,12 @@ class Win32Collector(threading.Thread):
                         except Exception: pass
 
     def _install_hook(self):
-        """WH_CALLWNDPROCRET in-process hook. hMod=None + restype=c_void_p
-        ile 'basarisiz: 0' bug'i duzeltildi."""
         WH_CALLWNDPROCRET = 12
         user32 = ctypes.windll.user32
 
         HOOKPROC = ctypes.WINFUNCTYPE(
             ctypes.c_long, ctypes.c_int, ctypes.c_ulonglong, ctypes.c_longlong)
 
-        # >>> FIX: restype/argtypes <<<
         user32.SetWindowsHookExW.restype = ctypes.c_void_p
         user32.SetWindowsHookExW.argtypes = [
             ctypes.c_int, HOOKPROC, ctypes.c_void_p, ctypes.c_uint]
@@ -548,7 +516,6 @@ class Win32Collector(threading.Thread):
 
         emit = self.emit
         def _proc(nCode, wParam, lParam):
-            # WM_ACTIVATEAPP / WM_ACTIVATE (UI akisini gormek icin)
             if nCode >= 0 and wParam in (0x001C, 0x0006):
                 try:
                     hwnd = ctypes.cast(lParam, ctypes.POINTER(ctypes.c_ulonglong))[0]
@@ -565,8 +532,7 @@ class Win32Collector(threading.Thread):
             return user32.CallNextHookEx(None, nCode, wParam, lParam)
 
         cb = HOOKPROC(_proc)
-        self.hook_cb = cb  # referans tut
-        # >>> FIX: hMod=None (in-process hook), threadId=0 <<<
+        self.hook_cb = cb
         h = user32.SetWindowsHookExW(WH_CALLWNDPROCRET, cb, None, 0)
         if h:
             self.hook = h
@@ -585,9 +551,6 @@ class Win32Collector(threading.Thread):
             except Exception: pass
 
 
-# =================================================================
-#  6. UNIFIED TRACER
-# =================================================================
 class UnifiedTracer:
     def __init__(self, emit):
         self.emit = emit
@@ -661,9 +624,6 @@ class UnifiedTracer:
             f'(sure: {datetime.now() - self.start_time})', level='info'))
 
 
-# =================================================================
-#  GUI
-# =================================================================
 class App:
     SOURCES = {
         'ProcMon':  {'label':'ProcMon','color':'#ff9f43'},
@@ -691,7 +651,6 @@ class App:
         self.live_log_fh = None
         self.live_log_path = None
 
-        # ---- Ust Bar ----
         top = ttk.Frame(root, padding=6); top.pack(fill='x')
         self.btn_start = ttk.Button(top, text='\u25b6 Trace Baslat', command=self.start)
         self.btn_start.pack(side='left')
@@ -707,7 +666,6 @@ class App:
         self.status = ttk.Label(top, text=f'Desktop: {DESKTOP}', foreground='gray')
         self.status.pack(side='right')
 
-        # ---- Collector durum ----
         stat = ttk.Frame(root, padding=(6,0)); stat.pack(fill='x')
         self.collector_labels = {}
         for src, meta in self.SOURCES.items():
@@ -719,7 +677,6 @@ class App:
         self.log_path_lbl = ttk.Label(stat, text='', foreground='#666')
         self.log_path_lbl.pack(side='right')
 
-        # ---- Filtre ----
         filt = ttk.LabelFrame(root, text='Filtre', padding=6)
         filt.pack(fill='x', padx=6, pady=(4,0))
         self.f_sources = {}
@@ -745,7 +702,6 @@ class App:
         ent.pack(side='left', padx=4)
         ent.bind('<KeyRelease>', lambda e: self.refilter())
 
-        # ---- Log ----
         wrap = ttk.Frame(root); wrap.pack(fill='both', expand=True, padx=6, pady=6)
         self.txt = scrolledtext.ScrolledText(
             wrap, wrap='none', font=('Consolas', 9),
@@ -764,7 +720,6 @@ class App:
         atexit.register(self._close_logfile)
         root.after(60, self._drain)
 
-    # ---- Live log ----
     def _open_logfile(self):
         self._close_logfile()
         ts = datetime.now().strftime('%Y%m%d_%H%M%S')
@@ -796,7 +751,6 @@ class App:
             self.live_log_fh.flush()
         except Exception: pass
 
-    # ---- Event queue ----
     def _emit_u(self, uevent):
         self.queue.put(uevent)
 
@@ -805,7 +759,7 @@ class App:
             while True:
                 ev = self.queue.get_nowait()
                 self.log.append(ev)
-                self._write_live(ev)  # >>> DESKTOP'A ANINDA YAZ <<<
+                self._write_live(ev)
                 if self._passes(ev):
                     self._write_event(ev)
                 if ev.source in self.collector_labels and ev.etype != 'Error':
@@ -842,7 +796,6 @@ class App:
         for ev in self.log:
             if self._passes(ev): self._write_event(ev)
 
-    # ---- Actions ----
     def start(self):
         self._open_logfile()
         threading.Thread(target=self.tracer.start, daemon=True).start()

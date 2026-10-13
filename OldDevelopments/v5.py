@@ -1,6 +1,3 @@
-#!/usr/bin/env pythonw
-# bastard.pyw - Unified Windows Trace Toolkit v2.3
-# Rename: Bastard. Filter, marker, admin check, evtlog backfill.
 
 import tkinter as tk
 from tkinter import ttk, scrolledtext, filedialog, messagebox
@@ -33,7 +30,6 @@ except ImportError: pass
 NO_WINDOW = 0x08000000
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-# ---------- Yardimcilar ----------
 def is_admin():
     try:
         return ctypes.windll.shell32.IsUserAnAdmin() != 0
@@ -86,15 +82,12 @@ def find_procmon():
 
 PROCMON_EXE = find_procmon()
 
-# ---------- ProcMon keyword filtresi ----------
-# Sadece bu kelimeleri iceren path'ler rapor edilir (path casing lowercase).
 PROCMON_PATH_KEYWORDS = (
     'wallpaper', 'theme', 'personaliz', 'lockscreen', 'lock screen',
     'transcoded', 'photos', 'runtimebroker', 'immersive',
     'backgrounds', 'control panel\\desktop', 'shell',
 )
 
-# Bu process'lerin registry Set/Create/Delete eventleri her zaman rapor edilir.
 PROCMON_PROC_HOT = (
     'photos.exe', 'runtimebroker.exe', 'systemsettings.exe',
     'shellexperiencehost.exe', 'dllhost.exe', 'explorer.exe',
@@ -103,7 +96,6 @@ PROCMON_PROC_HOT = (
 )
 
 
-# ---------- Birlesik Event ----------
 class UEvent:
     __slots__ = ('ts', 'source', 'etype', 'pid', 'details', 'level', 'raw')
     def __init__(self, source, etype, details, pid=None, level='info', raw=None):
@@ -118,9 +110,6 @@ class UEvent:
         return f'{self.ts.strftime("%H:%M:%S.%f")[:-3]} [{self.source}] [{self.etype}] {self.details}'
 
 
-# =================================================================
-#  1. PROCMON
-# =================================================================
 class ProcMonCollector(threading.Thread):
     def __init__(self, emit, base_dir):
         super().__init__(daemon=True)
@@ -166,9 +155,7 @@ class ProcMonCollector(threading.Thread):
 
         self.running = True
         if HAVE_PROCMON_PARSER:
-            # 3 saniyede bir oku; PML tam otursun
             while self.running:
-                # 12 parca halinde 250ms bekle -> 3 sn
                 for _ in range(12):
                     if not self.running: break
                     time.sleep(0.25)
@@ -178,7 +165,6 @@ class ProcMonCollector(threading.Thread):
                 except Exception as e:
                     self.emit(UEvent('ProcMon', 'Error',
                         f'PML okuma: {e}', level='error'))
-            # son bir okuma
             try: self._read_new_events()
             except Exception: pass
         else:
@@ -252,7 +238,6 @@ class ProcMonCollector(threading.Thread):
                     self.seen_hashes.add(h)
                     self.raw_seen += 1
 
-                    # --- FILTRE ---
                     denied = self._is_denied(res)
                     path_low = str(path).lower()
                     pname_low = pname.lower()
@@ -311,9 +296,6 @@ class ProcMonCollector(threading.Thread):
         self.running = False
 
 
-# =================================================================
-#  2. ETW
-# =================================================================
 class ETWCollector(threading.Thread):
     KERNEL_REGISTRY = '{70EB4F03-C1DE-4F73-A051-33D13D541355}'
     KERNEL_FILE = '{EDD08927-9CC4-4E65-B970-C2560FB5C289}'
@@ -402,7 +384,6 @@ class ETWCollector(threading.Thread):
                 level = 'change'
             else:
                 level = 'info'
-            # Filtre: ilginc olmayan info'lari at
             if level == 'info' and not any(kw in low for kw in
                     ('wallpaper', 'theme', 'photos', 'personaliz',
                      'lockscreen', 'transcoded')):
@@ -417,9 +398,6 @@ class ETWCollector(threading.Thread):
         self.running = False
 
 
-# =================================================================
-#  3. WMI
-# =================================================================
 class WMICollector(threading.Thread):
     def __init__(self, emit):
         super().__init__(daemon=True)
@@ -489,7 +467,6 @@ class WMICollector(threading.Thread):
                         pid = getattr(ev, 'ProcessId', None)
                         name = getattr(ev, 'Name', '?')
                         cmd = getattr(ev, 'CommandLine', '') or ''
-                        # Filtre: ilginc processler
                         cl = cmd.lower()
                         nl = name.lower()
                         if nl in ('photos.exe', 'runtimebroker.exe', 'dllhost.exe',
@@ -514,9 +491,6 @@ class WMICollector(threading.Thread):
         self.running = False
 
 
-# =================================================================
-#  4. PSUTIL
-# =================================================================
 class PSUtilCollector(threading.Thread):
     TARGETS = ('photos.exe', 'runtimebroker.exe', 'dllhost.exe',
                'shellexperiencehost.exe', 'explorer.exe', 'sihost.exe',
@@ -571,9 +545,6 @@ class PSUtilCollector(threading.Thread):
         self.running = False
 
 
-# =================================================================
-#  5. WIN32 (EventLog + backfill)
-# =================================================================
 class Win32Collector(threading.Thread):
     def __init__(self, emit):
         super().__init__(daemon=True)
@@ -591,7 +562,6 @@ class Win32Collector(threading.Thread):
         while self.running: time.sleep(0.5)
 
     def _eventlog_loop(self):
-        # Backfill: son 60 saniyedeki Application/System Error/Warning
         cutoff = datetime.now() - timedelta(seconds=60)
         channels = ('Application', 'System')
         last_records = {}
@@ -684,9 +654,6 @@ class Win32Collector(threading.Thread):
         self.running = False
 
 
-# =================================================================
-#  6. UNIFIED TRACER
-# =================================================================
 class UnifiedTracer:
     def __init__(self, emit):
         self.emit = emit
@@ -763,9 +730,6 @@ class UnifiedTracer:
             level='error'))
 
 
-# =================================================================
-#  GUI
-# =================================================================
 class App:
     SOURCES = {
         'ProcMon': {'label': 'ProcMon', 'color': '#ff9f43'},
@@ -794,7 +758,6 @@ class App:
         self.live_log_path = None
         self.trace_start_ts = None
 
-        # Ust bar
         top = ttk.Frame(root, padding=6); top.pack(fill='x')
         self.btn_start = ttk.Button(top, text='\u25b6 Trace Baslat',
                                     command=self.start)
@@ -821,7 +784,6 @@ class App:
         self.status = ttk.Label(top, text=f'Desktop: {DESKTOP}', foreground='gray')
         self.status.pack(side='right')
 
-        # Admin uyari
         if not is_admin():
             warn = tk.Label(root,
                 text='\u26a0 Yonetici degilsin. ETW BOS KALACAK. '
@@ -829,7 +791,6 @@ class App:
                 fg='#ff4757', font=('Segoe UI', 9, 'bold'))
             warn.pack(fill='x', padx=6)
 
-        # Collector durum + timer
         stat = ttk.Frame(root, padding=(6, 0)); stat.pack(fill='x')
         self.collector_labels = {}
         for src, meta in self.SOURCES.items():
@@ -844,7 +805,6 @@ class App:
         self.log_path_lbl = ttk.Label(stat, text='', foreground='#666')
         self.log_path_lbl.pack(side='right')
 
-        # Yonlendirme
         guide = ttk.LabelFrame(root, text='NASIL KULLANILIR', padding=4)
         guide.pack(fill='x', padx=6, pady=(4, 0))
         ttk.Label(guide,
@@ -855,7 +815,6 @@ class App:
                  '5) \u25a0 Durdur',
             foreground='#c8d6e5').pack(anchor='w')
 
-        # Filtre
         filt = ttk.LabelFrame(root, text='Filtre', padding=6)
         filt.pack(fill='x', padx=6, pady=(4, 0))
         self.f_sources = {}
@@ -881,7 +840,6 @@ class App:
         ent.pack(side='left', padx=4)
         ent.bind('<KeyRelease>', lambda e: self.refilter())
 
-        # Log
         wrap = ttk.Frame(root); wrap.pack(fill='both', expand=True, padx=6, pady=6)
         self.txt = scrolledtext.ScrolledText(
             wrap, wrap='none', font=('Consolas', 9),

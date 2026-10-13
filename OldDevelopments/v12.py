@@ -1,11 +1,3 @@
-#!/usr/bin/env python
-# 21.py - Bastard v7
-# v7 yenilikleri:
-#  - Win32 label fix (acilista ready event)
-#  - Manuel SPI_SET testi (Photos bypass, hangi dosya oldugu sorulur)
-#  - Photos capabilities scan
-#  - ProcMon PML -> CSV fallback (procmon-parser bozuksa ProcMon kendi cevirir)
-#  - PML'yi ProcMon GUI'de ac butonu
 
 import tkinter as tk
 from tkinter import ttk, scrolledtext, filedialog, messagebox, simpledialog
@@ -191,7 +183,6 @@ SPIF_UPDATEINIFILE = 0x0001
 SPIF_SENDCHANGE    = 0x0002
 
 
-# --- Precheck helpers ---
 def _test_reg_write(hive, path, name, emit):
     try:
         k = winreg.OpenKey(hive, path, 0, winreg.KEY_READ | winreg.KEY_SET_VALUE)
@@ -602,14 +593,12 @@ class ProcMonCollector(threading.Thread):
         self._shutdown()
         time.sleep(1.5)
 
-        # 1) Once procmon-parser dene
         if HAVE_PROCMON_PARSER:
             try: self._parse_with_lib()
             except Exception as e:
                 self.emit(UEvent('ProcMon', 'Error',
                     f'lib parse: {e}', level='error'))
 
-        # 2) 5 event'ten azsa ProcMon kendi /OpenLog ... /SaveAs ile cevir
         if self.raw_seen < 5 and os.path.exists(self.pml_path):
             self.emit(UEvent('ProcMon', 'Process',
                 f'lib sadece {self.raw_seen} event verdi. '
@@ -680,14 +669,12 @@ class ProcMonCollector(threading.Thread):
                     getattr(ev, 'time_of_day', None))
 
     def _convert_pml_to_csv(self):
-        """ProcMon kendi /OpenLog /SaveAs ile CSV'ye cevirir."""
         try:
             cmd = [PROCMON_EXE, '/AcceptEula', '/Quiet', '/Minimized',
                    '/OpenLog', self.pml_path, '/SaveAs', self.csv_path]
             p = subprocess.Popen(cmd, creationflags=NO_WINDOW,
                                  stdout=subprocess.DEVNULL,
                                  stderr=subprocess.DEVNULL)
-            # ProcMon isini bitirince kapanir, 30 sn bekle
             try: p.wait(timeout=30)
             except subprocess.TimeoutExpired:
                 subprocess.run(['taskkill', '/F', '/PID', str(p.pid)],
@@ -705,7 +692,6 @@ class ProcMonCollector(threading.Thread):
     def _parse_csv(self):
         if not os.path.exists(self.csv_path): return
         try:
-            # ProcMon CSV UTF-16-LE, tab-separated
             for enc in ('utf-16', 'utf-8-sig', 'utf-8', 'latin-1'):
                 try:
                     with open(self.csv_path, 'r', encoding=enc,
@@ -971,7 +957,6 @@ class Win32Collector(threading.Thread):
 
     def run(self):
         self.running = True
-        # >>> FIX: hem Win32 hem EvtLog etiketleri yesile donsun <<<
         self.emit(UEvent('Win32', 'Process', 'Win32 hazir', level='info'))
         if HAVE_WIN32:
             self.emit(UEvent('EvtLog', 'Process', 'EventLog hazir', level='info'))
@@ -1253,7 +1238,6 @@ class App:
         root.after(500, self._tick)
 
     def spi_test(self):
-        """Istedigin dosyayi Windows API ile wallpaper yap (Photos bypass)."""
         p = filedialog.askopenfilename(
             title='Wallpaper yapilacak resmi sec',
             initialdir=str(DESKTOP),
@@ -1363,7 +1347,6 @@ class App:
                 if self._passes(ev): self._write_event(ev)
                 if ev.source in self.collector_labels:
                     self.collector_labels[ev.source].config(fg='green')
-                # PML hazir olunca butonu ac
                 if ev.source == 'ProcMon' and '->' in ev.details:
                     base = BASE_DIR
                     for f in os.listdir(base):

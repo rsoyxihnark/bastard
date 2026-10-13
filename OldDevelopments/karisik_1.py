@@ -1,16 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# 28.pyw - Windows forensic diagnostic tool (single file, ASCII only)
-#
-# CHANGELOG (28):
-# - WPR status: "not needed (pywintrace)" / "not needed (logman)"
-#   instead of "not used". Clearer when ETW path is active.
-# - Hook status: green when any hook works (cwpret or winevent).
-#   Note shows which method is active: "ok", "winevent", "cwpret".
-# - Events tree: vertical AND horizontal scrollbars, both visible
-#   against dark theme. Grid layout inside the container so long
-#   detail rows can be inspected without cutting off.
-# - Scrollbar styles: lighter thumb (PANEL3), visible arrow color.
 
 import os, sys, time, json, csv, re, threading, queue, traceback
 import subprocess, tempfile, ctypes
@@ -24,9 +11,6 @@ try:
 except Exception:
     winreg = None
 
-# ---------------------------------------------------------------------------
-# Hidden subprocess runner
-# ---------------------------------------------------------------------------
 CREATE_NO_WINDOW = 0x08000000
 
 def _run(cmd, timeout=30, **kw):
@@ -41,9 +25,6 @@ def _run(cmd, timeout=30, **kw):
             pass
     return subprocess.run(cmd, timeout=timeout, **kw)
 
-# ---------------------------------------------------------------------------
-# Desktop
-# ---------------------------------------------------------------------------
 def _resolve_desktop():
     try:
         CSIDL_DESKTOPDIRECTORY = 0x0010
@@ -162,9 +143,6 @@ try:
 except Exception:
     pass
 
-# ---------------------------------------------------------------------------
-# Event model
-# ---------------------------------------------------------------------------
 class UEvent(object):
     __slots__ = ("ts", "source", "type", "pid", "detail", "level")
     def __init__(self, ts, source, type_, pid, detail, level="INFO"):
@@ -240,9 +218,6 @@ def emit(source, type_, pid, detail, level="INFO"):
     live_log("[" + level + "] " + source + "/" + type_ + " " + str(detail)[:400])
     return ev
 
-# ---------------------------------------------------------------------------
-# Admin
-# ---------------------------------------------------------------------------
 def is_admin():
     try:
         return bool(ctypes.windll.shell32.IsUserAnAdmin())
@@ -265,9 +240,6 @@ def relaunch_as_admin():
         startup_log("relaunch failed: " + str(e))
         return False
 
-# ---------------------------------------------------------------------------
-# Registry helpers
-# ---------------------------------------------------------------------------
 NONPRINT_THRESHOLD = 0.30
 BLOB_MAX_LEN = 200
 
@@ -341,9 +313,6 @@ def reg_key_exists(root, path):
     except Exception:
         return False
 
-# ---------------------------------------------------------------------------
-# Stop flag
-# ---------------------------------------------------------------------------
 class StopFlag(object):
     def __init__(self):
         self.evt = threading.Event()
@@ -354,9 +323,6 @@ class StopFlag(object):
     def wait(self, t):
         return self.evt.wait(t)
 
-# ---------------------------------------------------------------------------
-# RegPoll
-# ---------------------------------------------------------------------------
 REG_ROOTS = [
     ("HKCU", winreg.HKEY_CURRENT_USER if winreg else None,
      r"Control Panel\Desktop"),
@@ -410,9 +376,6 @@ def collector_regpoll(stop):
             emit("RegPoll", "Error", 0, "poll: " + str(e), "MEDIUM")
         stop.wait(1.0)
 
-# ---------------------------------------------------------------------------
-# FileWatch
-# ---------------------------------------------------------------------------
 FW_DIRS = [
     os.path.join(os.environ.get("APPDATA", ""), r"Microsoft\Windows\Themes"),
     os.path.join(os.environ.get("LOCALAPPDATA", ""), r"Microsoft\Windows\Themes"),
@@ -438,7 +401,7 @@ def _dir_snapshot(d):
 
 def collector_filewatch(stop):
     try:
-        import watchdog  # noqa
+        import watchdog
         have_wd = True
     except Exception:
         have_wd = False
@@ -495,9 +458,6 @@ def collector_filewatch(stop):
     except Exception as e:
         STATUS.set("FileWatch", "red", "watchdog: " + str(e))
 
-# ---------------------------------------------------------------------------
-# Win32
-# ---------------------------------------------------------------------------
 SPI_GETDESKWALLPAPER = 0x0073
 SPI_SETDESKWALLPAPER = 0x0014
 SPIF_UPDATEINIFILE = 0x01
@@ -543,9 +503,6 @@ def collector_win32(stop):
         except Exception as e:
             emit("Win32", "Error", 0, str(e), "LOW")
 
-# ---------------------------------------------------------------------------
-# Proc
-# ---------------------------------------------------------------------------
 WATCH_PROCS = {
     "photos.exe", "runtimebroker.exe", "dllhost.exe", "systemsettings.exe",
     "explorer.exe", "sihost.exe", "startmenuexperiencehost.exe",
@@ -555,7 +512,7 @@ WATCH_PROCS = {
 
 def collector_proc(stop):
     try:
-        import psutil  # noqa
+        import psutil
         use_psutil = True
     except Exception:
         use_psutil = False
@@ -653,9 +610,6 @@ def collector_proc(stop):
             emit("Proc", "Error", 0, "snap: " + str(e), "LOW")
         stop.wait(1.5)
 
-# ---------------------------------------------------------------------------
-# EvtLog
-# ---------------------------------------------------------------------------
 EVT_CHANNELS = [
     "Application",
     "System",
@@ -668,7 +622,7 @@ EVT_CHANNELS = [
 
 def collector_evtlog(stop):
     try:
-        import win32evtlog  # noqa
+        import win32evtlog
     except Exception:
         STATUS.set("EvtLog", "red", "pywin32 yok")
         return
@@ -719,13 +673,10 @@ def collector_evtlog(stop):
                 pass
         last_ts = now
 
-# ---------------------------------------------------------------------------
-# WMI
-# ---------------------------------------------------------------------------
 def collector_wmi(stop):
     try:
-        import pythoncom  # noqa
-        import wmi  # noqa
+        import pythoncom
+        import wmi
     except Exception:
         STATUS.set("WMI", "red", "wmi/pythoncom yok")
         return
@@ -801,9 +752,6 @@ def collector_wmi(stop):
     stop_local.set()
     th1.join(timeout=3); th2.join(timeout=3)
 
-# ---------------------------------------------------------------------------
-# ETW / WPR
-# ---------------------------------------------------------------------------
 ETW_PROVIDERS = [
     ("Kernel-Registry", "{70EB4F03-C1DE-4F73-A051-33D13D541355}"),
     ("Kernel-File", "{EDD08927-9CC4-4E65-B970-C2560FB5C289}"),
@@ -813,7 +761,7 @@ ETW_PROVIDERS = [
 
 def _try_pywintrace(stop):
     try:
-        import etw  # noqa
+        import etw
     except Exception:
         return False
     try:
@@ -951,9 +899,6 @@ def collector_etw(stop):
         STATUS.set("ETW", "red", "admin yok")
         STATUS.set("WPR", "red", "admin yok")
 
-# ---------------------------------------------------------------------------
-# ProcMon
-# ---------------------------------------------------------------------------
 def find_procmon():
     here = os.path.dirname(os.path.abspath(__file__))
     cands = [
@@ -1074,9 +1019,6 @@ def collector_procmon(stop, pml_holder):
     except Exception as e:
         emit("ProcMon", "Error", 0, "convert: " + str(e), "LOW")
 
-# ---------------------------------------------------------------------------
-# Hook
-# ---------------------------------------------------------------------------
 class HookCollector(object):
     def __init__(self):
         self.hook = None
@@ -1208,26 +1150,23 @@ class HookCollector(object):
             pass
         self.win_hooks = []
 
-# ---------------------------------------------------------------------------
-# WinRT
-# ---------------------------------------------------------------------------
 def collector_winrt(stop):
     STATUS.set("WinRT", "gray", "probe")
     ps = (
         "$ErrorActionPreference='SilentlyContinue';"
         "try {"
         "  [void][Windows.System.UserProfile.UserProfilePersonalizationSettings,"
-        "Windows.System.UserProfile, ContentType=WindowsRuntime];"
+        "Windows.System.UserProfile, ContentType=WindowsRuntime];" +
         "  $s=[Windows.System.UserProfile.UserProfilePersonalizationSettings]"
         "::IsSupported();"
         "  Write-Output ('IsSupported=' + $s);"
-        "} catch { Write-Output ('ERR:' + $_.Exception.Message) }"
+        "} catch { Write-Output ('ERR:' + $_.Exception.Message) }" +
         "try {"
         "  $img=[Windows.System.UserProfile.LockScreen,"
         "Windows.System.UserProfile, ContentType=WindowsRuntime]"
         "::OriginalImageFile;"
         "  Write-Output ('LockScreenOriginalImageFile=' + $img);"
-        "} catch { Write-Output ('ERR2:' + $_.Exception.Message) }"
+        "} catch { Write-Output ('ERR2:' + $_.Exception.Message) }" +
         "try {"
         "  $pkg=Get-AppxPackage Microsoft.Windows.Photos | "
         "Select-Object Name,Status,Version,PackageFullName | "
@@ -1264,9 +1203,6 @@ def collector_winrt(stop):
     while not stop.is_set():
         stop.wait(5.0)
 
-# ---------------------------------------------------------------------------
-# Probes A-K
-# ---------------------------------------------------------------------------
 def probe_policy():
     emit("Diag", "Diag", 0, "== A: personalization policy ==", "INFO")
     keys = [
@@ -1524,9 +1460,6 @@ def run_all_probes():
         except Exception as e:
             emit("Diag", "Error", 0, "probe %s: %s" % (fn.__name__, e), "LOW")
 
-# ---------------------------------------------------------------------------
-# Marker
-# ---------------------------------------------------------------------------
 def is_relevant(ev):
     if ev.source in ("RegPoll", "FileWatch"):
         return True
@@ -1538,9 +1471,6 @@ def is_relevant(ev):
             return True
     return False
 
-# ---------------------------------------------------------------------------
-# Theme
-# ---------------------------------------------------------------------------
 class T:
     BG       = "#181825"
     PANEL    = "#1e1e2e"
@@ -1558,12 +1488,9 @@ class T:
     RED      = "#f38ba8"
     PURPLE   = "#cba6f7"
     SELECT   = "#45475a"
-    SCROLL   = "#585b70"   # visible thumb
-    SCROLL_H = "#7f849c"   # hover thumb
+    SCROLL   = "#585b70"
+    SCROLL_H = "#7f849c"
 
-# ---------------------------------------------------------------------------
-# UI
-# ---------------------------------------------------------------------------
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, font as tkfont
 
@@ -1754,7 +1681,6 @@ class App(object):
         s.map("Treeview.Heading",
               background=[("active", T.PANEL3)],
               foreground=[("active", T.FG)])
-        # Highly visible scrollbars
         for style_name in ("Vertical.TScrollbar", "Horizontal.TScrollbar"):
             s.configure(style_name,
                         background=T.SCROLL,
@@ -1894,7 +1820,6 @@ class App(object):
         self.search_entry.bind("<KeyRelease>", lambda _e: self.refresh_view())
         fb.columnconfigure(1, weight=1)
 
-        # events area: tree + detail pane
         pw = ttk.PanedWindow(right, orient="vertical")
         pw.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=10, pady=0)
 
@@ -2269,7 +2194,6 @@ class App(object):
             for ev in reversed(self.events):
                 try:
                     if ev.fmt_time() == t and ev.source == src and ev.type == typ and str(ev.pid) == str(pid):
-                        # Prefer exact event, but fall back to prefix match when detail is truncated in the tree.
                         if detail and (ev.detail.startswith(detail) or detail.startswith(ev.detail[:len(detail)])):
                             return ev
                         return ev
@@ -2391,9 +2315,6 @@ class App(object):
         except Exception:
             pass
 
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
 def main():
     startup_log("main() entered")
     admin = is_admin()

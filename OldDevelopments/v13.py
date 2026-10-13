@@ -1,6 +1,3 @@
-#!/usr/bin/env python
-# 22.py - Bastard v8
-# v8: UI freeze fix (truncation, batch drain), non-modal SPI Test, Photos Fix butonu
 
 import tkinter as tk
 from tkinter import ttk, scrolledtext, filedialog, messagebox
@@ -190,7 +187,6 @@ SPIF_SENDCHANGE    = 0x0002
 
 
 def _fmt_value(v, max_len=200):
-    """Binary/large value'lari guvenli goster."""
     try: s = str(v)
     except Exception: return '<unprintable>'
     if len(s) > max_len:
@@ -1160,7 +1156,6 @@ class App:
     def _emit_u(self, ev): self.queue.put(ev)
 
     def _drain(self):
-        # >>> FIX: batch + drop <<<
         processed = 0
         try:
             while processed < MAX_UI_PER_TICK:
@@ -1182,7 +1177,6 @@ class App:
         except queue.Empty:
             pass
 
-        # Queue hala cok buyukse eski event'leri at
         if self.queue.qsize() > MAX_QUEUE_BEFORE_DROP:
             drop = 0
             while self.queue.qsize() > 2000:
@@ -1252,7 +1246,6 @@ class App:
         self.root.destroy()
 
     def precheck(self):
-        # v8: precheck kaldirildi (artik gerek yok, SPI test yeterli)
         self._emit_u(UEvent('System', 'Process',
             'Precheck v8 kaldirildi. SPI Test butonu kullan.', level='info'))
 

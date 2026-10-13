@@ -1,7 +1,3 @@
-#!/usr/bin/env python
-# 23.py - Bastard v9
-# v9: Shell verb check, Photos re-register, RESCAP anomali uyarisi
-# v8 fixleri korundu (UI freeze, truncation, batch drain)
 
 import tkinter as tk
 from tkinter import ttk, scrolledtext, filedialog, messagebox
@@ -44,7 +40,6 @@ MAX_EVENT_DETAIL = 500
 MAX_UI_PER_TICK = 500
 MAX_QUEUE_BEFORE_DROP = 5000
 
-# Photos'un SAHIP OLMASI GEREKEN capability'ler
 EXPECTED_PHOTOS_CAPS = {'runFullTrust', 'picturesLibrary', 'internetClient'}
 
 
@@ -219,11 +214,7 @@ class UEvent:
                 f'[{self.source}] [{self.etype}] {self.details}')
 
 
-# =================================================================
-#  DIAGNOSTICS
-# =================================================================
 def check_shell_verbs(emit):
-    """Set as wallpaper shell verb'u kontrol et."""
     emit('--- SHELL VERB CHECK ---', 'info')
     locations = [
         (winreg.HKEY_CLASSES_ROOT, r'SystemFileAssociations\.jpg\shell\setaswallpaper'),
@@ -264,7 +255,6 @@ def check_shell_verbs(emit):
     else:
         emit(f'  Toplam {found} lokasyonda bulundu', 'info')
 
-    # Wallpaper iliskilendirme genel
     emit('--- IMAGE ASSOCIATION CHECK ---', 'info')
     for ext in ('.jpg', '.jpeg', '.png', '.bmp'):
         try:
@@ -272,7 +262,6 @@ def check_shell_verbs(emit):
             try:
                 v, _ = winreg.QueryValueEx(k, None)
                 emit(f'  {ext} -> ProgID: {v}', 'change')
-                # ProgID shell verb'lerine bak
                 try:
                     pk = winreg.OpenKey(winreg.HKEY_CLASSES_ROOT,
                                         f'{v}\\shell')
@@ -294,7 +283,6 @@ def check_shell_verbs(emit):
 
 
 def check_photos_package(emit):
-    """Photos AppX capability'lerini kontrol et ve anomalileri bildir."""
     emit('--- PHOTOS PACKAGE CHECK ---', 'info')
     try:
         ps = ("(Get-AppxPackage Microsoft.Windows.Photos).Capabilities | "
@@ -326,7 +314,6 @@ def check_photos_package(emit):
 
 
 def do_photos_reregister(emit):
-    """Photos AppX'i yeniden kaydet (reset degil)."""
     emit('--- PHOTOS RE-REGISTER ---', 'info')
     try:
         ps = "Get-AppxPackage Microsoft.Windows.Photos | " \
@@ -346,7 +333,6 @@ def do_photos_reregister(emit):
 
 
 def do_restore_shell_verb(emit):
-    """Set as wallpaper shell verb'unu geri yukle (HKCU, admin gerekmez)."""
     emit('--- SHELL VERB RESTORE ---', 'info')
     base = r'Software\Classes\SystemFileAssociations\.jpg\shell\setaswallpaper'
     try:
@@ -364,7 +350,6 @@ def do_restore_shell_verb(emit):
     except Exception as e:
         emit(f'  Hata: {e}', 'error')
 
-    # png de ayni
     base2 = r'Software\Classes\SystemFileAssociations\.png\shell\setaswallpaper'
     try:
         k = winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER, base2, 0,
@@ -382,9 +367,6 @@ def do_restore_shell_verb(emit):
         emit(f'  Hata (png): {e}', 'error')
 
 
-# =================================================================
-#  COLLECTORS
-# =================================================================
 REG_POLL_TARGETS = [
     ('HKCU', r'Control Panel\Desktop'),
     ('HKCU', r'Software\Microsoft\Windows\CurrentVersion\Explorer\Wallpapers'),
@@ -1014,7 +996,6 @@ class UnifiedTracer:
         if missing:
             self.emit(UEvent('System', 'Error', f'Eksik: {", ".join(missing)}', level='error'))
 
-        # >>> v9: OTOMATIK DIAGNOSTIC <<<
         def _diag(emit):
             def e(m, l='info'): emit(UEvent('Diag', 'Log', m, level=l))
             try:

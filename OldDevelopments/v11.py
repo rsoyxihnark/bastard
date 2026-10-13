@@ -1,14 +1,3 @@
-#!/usr/bin/env python
-# 20.py - Bastard v6
-# v6 yenilikleri:
-#  - Trace baslarken DeepPrecheck otomatik calisir: aktif yazma ve API testleri
-#  - Registry TEST WRITE (acl kontrolu)
-#  - SystemParametersInfo SPI_GET/SPI_SET API testleri (wallpaper API)
-#  - TranscodedWallpaper yazma testi
-#  - Policy deep scan (15+ key)
-#  - icacls ile ACL dump
-#  - Get-AppxPackage ile Photos capability kontrolu
-#  - ProcMon: hedefli registry reset + <5 event fallback + PML yolunu goster
 
 import tkinter as tk
 from tkinter import ttk, scrolledtext, filedialog, messagebox
@@ -50,9 +39,6 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 SCRIPT_STEM = Path(__file__).stem or '20'
 
 
-# =================================================================
-#  STARTUP LOG
-# =================================================================
 def _find_desktop_early():
     try:
         up = Path(os.environ.get('USERPROFILE', str(Path.home())))
@@ -87,9 +73,6 @@ _startup_log(f'{SCRIPT_STEM} boot: py={sys.version.split()[0]}')
 _install_excepthook()
 
 
-# =================================================================
-#  CONFIG
-# =================================================================
 CONFIG_PATH = (Path(os.environ.get('LOCALAPPDATA', str(Path.home())))
                / 'Bastard' / 'config.json')
 
@@ -109,9 +92,6 @@ def save_config(cfg):
         _startup_log(f'config save: {e}')
 
 
-# =================================================================
-#  ADMIN
-# =================================================================
 _shell_execute = ctypes.windll.shell32.ShellExecuteW
 _shell_execute.restype = ctypes.c_ssize_t
 SW_SHOWNORMAL = 1
@@ -165,9 +145,6 @@ def _show_admin_prompt(parent) -> str:
     return result['value']
 
 
-# =================================================================
-#  YARDIMCILAR
-# =================================================================
 def find_desktop():
     try:
         class GUID(ctypes.Structure):
@@ -208,16 +185,12 @@ def find_procmon():
 PROCMON_EXE = find_procmon()
 
 
-# =================================================================
-#  AKTIF TESTLER (DeepPrecheck)
-# =================================================================
 SPI_GETDESKWALLPAPER = 0x0073
 SPI_SETDESKWALLPAPER = 0x0014
 SPIF_UPDATEINIFILE = 0x0001
 SPIF_SENDCHANGE    = 0x0002
 
 def _test_registry_write(hive, path, name, emit):
-    """Ayni degeri geri yazarak ACL kontrolu yapar."""
     try:
         k = winreg.OpenKey(hive, path, 0, winreg.KEY_READ | winreg.KEY_SET_VALUE)
     except PermissionError as e:
@@ -351,7 +324,6 @@ def _test_photos_appx(emit):
 
 
 class DeepPrecheck(threading.Thread):
-    """Trace baslarken otomatik calisir. Aktif yazma/API testleri."""
     def __init__(self, emit):
         super().__init__(daemon=True)
         self.emit = emit
@@ -364,10 +336,8 @@ class DeepPrecheck(threading.Thread):
 
         say('===== DEEP PRECHECK =====')
 
-        # 1. Yetki
         say(f'Admin: {"EVET" if is_admin() else "HAYIR"}')
 
-        # 2. Registry testleri
         say('[Registry Testleri]')
         _test_registry_write(winreg.HKEY_CURRENT_USER,
             r'Control Panel\Desktop', 'WallPaper',
@@ -382,16 +352,13 @@ class DeepPrecheck(threading.Thread):
             r'Software\Microsoft\Windows\CurrentVersion\Themes',
             'CurrentTheme', lambda m: say(m, 'change'))
 
-        # 3. API testleri
         say('[Wallpaper API Testleri]')
         cur = _test_spi_get(lambda m: say(m, 'change'))
         _test_spi_set(lambda m: say(m, 'change'), cur)
 
-        # 4. File testleri
         say('[Dosya Yazma Testleri]')
         _test_transcoded_write(lambda m: say(m, 'change'))
 
-        # 5. Policy deep scan
         say('[Policy Deep Scan]')
         policies = [
             ('HKCU', r'Software\Microsoft\Windows\CurrentVersion\Policies\ActiveDesktop', 'NoChangingWallPaper'),
@@ -433,14 +400,12 @@ class DeepPrecheck(threading.Thread):
         if not found_any:
             say('  Politika yok (iyi haber)')
 
-        # 6. ACL dump
         say('[ACL Dump]')
         _test_icacls(lambda m: say(m, 'change'),
                      'HKCU', r'Control Panel\Desktop')
         _test_icacls(lambda m: say(m, 'change'),
                      'HKCU', r'Software\Microsoft\Windows\CurrentVersion\Policies')
 
-        # 7. TranscodedWallpaper
         say('[TranscodedWallpaper]')
         ad = os.environ.get('APPDATA', '')
         wp = os.path.join(ad, 'Microsoft', 'Windows', 'Themes', 'TranscodedWallpaper')
@@ -450,7 +415,6 @@ class DeepPrecheck(threading.Thread):
         else:
             say(f'  Yok: {wp}')
 
-        # 8. Servisler
         say('[Servisler]')
         if HAVE_PSUTIL:
             for svc in ('Themes', 'AppXSvc', 'ClipSVC', 'StateRepository',
@@ -464,16 +428,12 @@ class DeepPrecheck(threading.Thread):
                 except Exception as ex:
                     warn(f'  >> Servis yok: {svc} ({ex})')
 
-        # 9. Photos AppX
         say('[Photos AppX]')
         _test_photos_appx(lambda m: say(m, 'change'))
 
         say('===== DEEP PRECHECK BITTI =====')
 
 
-# =================================================================
-#  EVENTS
-# =================================================================
 class UEvent:
     __slots__ = ('ts', 'source', 'etype', 'pid', 'details', 'level', 'raw')
     def __init__(self, source, etype, details, pid=None, level='info', raw=None):
@@ -527,9 +487,6 @@ PROCMON_PROC_HOT = (
 )
 
 
-# =================================================================
-#  REGISTRY POLLER
-# =================================================================
 class RegistryPoller(threading.Thread):
     def __init__(self, emit, interval=0.5):
         super().__init__(daemon=True)
@@ -609,9 +566,6 @@ class RegistryPoller(threading.Thread):
         self.running = False
 
 
-# =================================================================
-#  FILE WATCH
-# =================================================================
 class FileWatchCollector(threading.Thread):
     def __init__(self, emit):
         super().__init__(daemon=True)
@@ -661,9 +615,6 @@ class FileWatchCollector(threading.Thread):
         self.running = False
 
 
-# =================================================================
-#  PROCMON
-# =================================================================
 class ProcMonCollector(threading.Thread):
     def __init__(self, emit, base_dir):
         super().__init__(daemon=True)
@@ -843,9 +794,6 @@ class ProcMonCollector(threading.Thread):
         self.running = False
 
 
-# =================================================================
-#  ETW
-# =================================================================
 class ETWCollector(threading.Thread):
     KERNEL_REGISTRY = '{70EB4F03-C1DE-4F73-A051-33D13D541355}'
     KERNEL_FILE     = '{EDD08927-9CC4-4E65-B970-C2560FB5C289}'
@@ -940,9 +888,6 @@ class ETWCollector(threading.Thread):
         self.running = False
 
 
-# =================================================================
-#  WMI
-# =================================================================
 class WMICollector(threading.Thread):
     def __init__(self, emit):
         super().__init__(daemon=True)
@@ -1010,9 +955,6 @@ class WMICollector(threading.Thread):
         self.running = False
 
 
-# =================================================================
-#  PSUTIL
-# =================================================================
 class PSUtilCollector(threading.Thread):
     TARGETS = ('photos.exe', 'runtimebroker.exe', 'dllhost.exe',
                'shellexperiencehost.exe', 'explorer.exe', 'sihost.exe',
@@ -1067,9 +1009,6 @@ class PSUtilCollector(threading.Thread):
         self.running = False
 
 
-# =================================================================
-#  WIN32/EVENTLOG
-# =================================================================
 class Win32Collector(threading.Thread):
     def __init__(self, emit):
         super().__init__(daemon=True)
@@ -1181,9 +1120,6 @@ class Win32Collector(threading.Thread):
         self.running = False
 
 
-# =================================================================
-#  TRACER
-# =================================================================
 class UnifiedTracer:
     def __init__(self, emit):
         self.emit = emit; self.collectors = []
@@ -1215,7 +1151,6 @@ class UnifiedTracer:
             self.emit(UEvent('System', 'Error',
                 f'Eksik pip: {", ".join(missing)}', level='error'))
 
-        # >>> DEEP PRECHECK OTOMATIK <<<
         DeepPrecheck(self.emit).start()
 
         self.emit(UEvent('System', 'Marker',
@@ -1252,9 +1187,6 @@ class UnifiedTracer:
             level='error'))
 
 
-# =================================================================
-#  GUI
-# =================================================================
 class App:
     SOURCES = {
         'Precheck':  {'label': 'Precheck', 'color': '#ff00ff'},

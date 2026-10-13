@@ -1,13 +1,3 @@
-#!/usr/bin/env python
-# 25.py - Bastard v11
-# v11:
-#  - Tum string literal quoting hatalari duzeltildi (apostrof iceren metinler cift tirnakli)
-#  - Versiyon damgasi v11
-# v10 ozellikleri korundu:
-#  - ETW ready event + user-mode fallback
-#  - WMI ready event + registry watchers
-#  - ProcMon lib parse hatasi sessizce yutuluyor
-#  - Photos No-Action Detector (marker sonrasi 6sn event yoksa uyari)
 
 import tkinter as tk
 from tkinter import ttk, scrolledtext, filedialog, messagebox
@@ -346,9 +336,6 @@ def do_restore_shell_verb(emit):
             emit(f'  {ext} Hata: {e}', 'error')
 
 
-# =================================================================
-#  RegistryPoller
-# =================================================================
 REG_POLL_TARGETS = [
     ('HKCU', r'Control Panel\Desktop'),
     ('HKCU', r'Software\Microsoft\Windows\CurrentVersion\Explorer\Wallpapers'),
@@ -431,9 +418,6 @@ class RegistryPoller(threading.Thread):
     def stop(self): self.running = False
 
 
-# =================================================================
-#  FileWatch
-# =================================================================
 def file_watch_targets():
     targets = []
     ad = os.environ.get('APPDATA', ''); la = os.environ.get('LOCALAPPDATA', '')
@@ -486,9 +470,6 @@ class FileWatchCollector(threading.Thread):
     def stop(self): self.running = False
 
 
-# =================================================================
-#  ProcMon
-# =================================================================
 PROCMON_PATH_KW = ('wallpaper', 'theme', 'personaliz', 'lockscreen',
                    'transcoded', 'photos', 'runtimebroker', 'immersive',
                    'control panel\\desktop', 'shell')
@@ -707,9 +688,6 @@ class ProcMonCollector(threading.Thread):
     def stop(self): self.running = False
 
 
-# =================================================================
-#  ETW  (ready event + user-mode fallback)
-# =================================================================
 class ETWCollector(threading.Thread):
     KREG = '{70EB4F03-C1DE-4F73-A051-33D13D541355}'
     KFILE = '{EDD08927-9CC4-4E65-B970-C2560FB5C289}'
@@ -822,9 +800,6 @@ class ETWCollector(threading.Thread):
     def stop(self): self.running = False
 
 
-# =================================================================
-#  WMI  (ready event + registry watchers)
-# =================================================================
 class WMICollector(threading.Thread):
     def __init__(self, emit):
         super().__init__(daemon=True)
@@ -925,9 +900,6 @@ class WMICollector(threading.Thread):
     def stop(self): self.running = False
 
 
-# =================================================================
-#  psutil
-# =================================================================
 class PSUtilCollector(threading.Thread):
     TARGETS = ('photos.exe', 'runtimebroker.exe', 'dllhost.exe',
                'shellexperiencehost.exe', 'explorer.exe', 'sihost.exe',
@@ -979,9 +951,6 @@ class PSUtilCollector(threading.Thread):
     def stop(self): self.running = False
 
 
-# =================================================================
-#  Win32 / EventLog
-# =================================================================
 class Win32Collector(threading.Thread):
     def __init__(self, emit):
         super().__init__(daemon=True)
@@ -1084,9 +1053,6 @@ class Win32Collector(threading.Thread):
     def stop(self): self.running = False
 
 
-# =================================================================
-#  UnifiedTracer
-# =================================================================
 class UnifiedTracer:
     def __init__(self, emit):
         self.emit = emit; self.collectors = []; self.running = False
@@ -1155,9 +1121,6 @@ class UnifiedTracer:
             level='error'))
 
 
-# =================================================================
-#  GUI
-# =================================================================
 class App:
     SOURCES = {
         'Diag':      {'label': 'Diag', 'color': '#00d9ff'},
@@ -1391,7 +1354,6 @@ class App:
         else:
             self.queue_lbl.config(text='')
 
-        # Marker sonrasi action gorulmediyse 6 sn sonra uyar
         if self._last_marker_ts and not self._marker_action_seen:
             if datetime.now() - self._last_marker_ts > timedelta(seconds=6):
                 self._emit_u(UEvent('System', 'Marker',

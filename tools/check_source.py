@@ -8,7 +8,8 @@ import tokenize
 
 LIMIT = 248
 ENTRY_GOAL = 140
-EXEMPT_PREFIXES = ("OldDevelopments/", "archive/", ".cl" "aude/")
+EXEMPT_PREFIXES = ("archive/", ".cl" "aude/")
+OLD_PREFIX = "OldDevelopments/"
 EXEMPT_FILES = ("CL" "AUDE.md",)
 TEXT_SUFFIXES = (".py", ".pyw", ".md", ".yml", ".yaml", ".txt", ".json", ".cfg", ".toml", ".ini", ".ps1", ".bat")
 TEXT_NAMES = (".gitignore", ".gitattributes")
@@ -70,11 +71,12 @@ def docstring_nodes(tree):
                 yield body[0]
 
 
-def check_python(path, text, report):
+def check_python(path, text, report, strict=True):
+    unreadable = report.error if strict else report.note
     try:
         tokens = list(tokenize.generate_tokens(io.StringIO(text).readline))
     except (tokenize.TokenError, SyntaxError) as exc:
-        report.error(path, 0, "could not be read as Python: %s" % exc)
+        unreadable(path, 0, "could not be read as Python: %s" % exc)
         return
     for token in tokens:
         if token.type == tokenize.COMMENT:
@@ -82,7 +84,7 @@ def check_python(path, text, report):
     try:
         tree = ast.parse(text)
     except SyntaxError as exc:
-        report.error(path, exc.lineno, "syntax error: %s" % exc.msg)
+        unreadable(path, exc.lineno, "syntax error: %s" % exc.msg)
         return
     for node in docstring_nodes(tree):
         report.error(path, node.lineno, "docstring")
@@ -183,7 +185,7 @@ def main():
         checked += 1
         check_text(path, text, report)
         if path.endswith((".py", ".pyw")):
-            check_python(path, text, report)
+            check_python(path, text, report, not path.startswith(OLD_PREFIX))
         if path == "bastard.pyw":
             version = check_program(path, text, report)
         if path == "CHANGELOG.md":
