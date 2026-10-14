@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.10.1
+
+- Bastard 1.10.1 keeps the ProcMon summary and Trace stopped in a trace log that has reached its limit, however often rows repeat.
+- Fixed the trace log leaving out the ProcMon summary and Trace stopped when rows kept repeating after it had reached its limit.
+- A row in a trace log that has reached its limit keeps the count it had when the log stopped, and later repeats count as left out.
+
 ## 1.10.0
 
 - Bastard 1.10.0 lists a row that repeats only once, at the time it was first seen, with its count in brackets.

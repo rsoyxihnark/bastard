@@ -25,7 +25,7 @@ import tkinter as tk
 import tkinter.font as tkfont
 from tkinter import filedialog, messagebox, ttk
 
-VERSION = "1.10.0"
+VERSION = "1.10.1"
 
 APP_NAME = "Bastard"
 IS_WIN = os.name == "nt"
@@ -681,8 +681,8 @@ class Event:
             found += sum(1 for ts in self.times if start < ts <= end)
         return found
 
-    def headline(self):
-        return self.text + repeat_suffix(self.count)
+    def headline(self, count=None):
+        return self.text + repeat_suffix(self.count if count is None else count)
 
     def who(self):
         if self.proc and self.pid:
@@ -717,10 +717,10 @@ class Event:
             "event": self.text, "detail": self.detail, "count": self.count,
         }
 
-    def log_lines(self):
+    def log_lines(self, count=None):
         head = "%s  %-10s %-8s %-8s %-30s %s" % (stamp(self.ts), self.source, self.kind,
                                                 LEVEL_LABELS.get(self.level, self.level),
-                                                shorten(self.who(), 30), self.headline())
+                                                shorten(self.who(), 30), self.headline(count))
         lines = [head]
         for index, line in enumerate(self.detail.splitlines()):
             if index >= 40:
@@ -874,6 +874,10 @@ class LogWriter:
         self.dropped = 0
         self.left = []
         self.capped = False
+        self.kept = {}
+
+    def count_of(self, ev):
+        return self.kept.get(ev, 1) if self.capped else ev.count
 
     def start(self):
         try:
@@ -922,7 +926,8 @@ class LogWriter:
                     reached.append(ev)
                     continue
                 if isinstance(ev, int):
-                    self.written += ev
+                    if not self.room or self.written < self.room:
+                        self.written += ev
                     continue
                 if self.room and self.written >= self.room and (
                         ev.source != SRC_SYSTEM or (ev.kind == KIND_MARK and ev.detail)
@@ -935,6 +940,7 @@ class LogWriter:
                 self.events.append(ev)
                 lines.extend(rows)
             if self.room and self.written >= self.room and not self.capped:
+                self.kept = {item: item.count for item in self.events if item.count > 1}
                 self.capped = True
                 lines.append("(the log stops here: it reached its %d MB limit)" % (self.max_bytes // (1024 * 1024)))
             if self.handle is not None and lines:
@@ -957,8 +963,8 @@ class LogWriter:
             except Exception:
                 pass
             self.handle = None
-        if self.dropped:
-            missed = sum(ev.count for ev in self.left)
+        missed = sum(ev.count for ev in self.left) + sum(ev.count - self.count_of(ev) for ev in self.events)
+        if missed:
             footer.append("%s left out: the log reached its %d MB limit"
                           % (plural(missed, "later event"), self.max_bytes // (1024 * 1024)))
         try:
@@ -967,7 +973,7 @@ class LogWriter:
                 with open(temp, "w", encoding="utf-8", errors="replace", newline=LOG_NEWLINE) as fh:
                     fh.write("\n".join(self.header) + "\n\n")
                     for ev in sorted(self.events, key=Event.key):
-                        fh.write("\n".join(ev.log_lines()) + "\n")
+                        fh.write("\n".join(ev.log_lines(self.count_of(ev))) + "\n")
                     fh.write("\n" + "\n".join(footer) + "\n")
                 os.replace(temp, self.path)
             else:

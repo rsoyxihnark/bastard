@@ -2099,6 +2099,37 @@ class Timeline(unittest.TestCase):
         finally:
             shutil.rmtree(folder, ignore_errors=True)
 
+    def test_repeats_after_the_log_is_full_never_crowd_out_the_closing_lines(self):
+        folder = tempfile.mkdtemp(prefix="bastard_full_")
+        try:
+            path = os.path.join(folder, "trace.log")
+            limit = 200 * 1024
+            hub = b.Hub()
+            writer = b.LogWriter(path, ["header"], limit)
+            self.assertTrue(writer.start())
+            hub.writer = writer
+            now = time.time()
+            for index in range(3000):
+                hub.emit(b.SRC_PM, b.KIND_FILE, "ReadFile C:\\data\\%05d.bin" % index, ts=now + index * 0.001)
+            self.assertTrue(writer.flush(30.0))
+            self.assertTrue(writer.capped)
+            for ev in list(writer.events):
+                hub.emit(b.SRC_PM, b.KIND_FILE, ev.text, ts=ev.ts + 5)
+            for index in range(4000):
+                for step in range(2):
+                    hub.emit(b.SRC_PM, b.KIND_FILE, "RegQueryValue HKLM\\late\\%05d" % index, ts=now + 6 + step)
+            hub.emit(b.SRC_SYSTEM, b.KIND_SYS, "ProcMon: read 1802554 events, listed 11000 of 11000", ts=now + 11)
+            hub.emit(b.SRC_SYSTEM, b.KIND_SYS, "Trace stopped after 32 seconds", ts=now + 13)
+            writer.close(["Summary"], True)
+            with open(path, encoding="utf-8") as fh:
+                text = fh.read()
+            for line in ("ProcMon: read 1802554 events", "Trace stopped after 32 seconds", "11000 later events left out"):
+                self.assertIn(line, text)
+            self.assertNotIn("times)", text)
+            self.assertLess(os.path.getsize(path), limit)
+        finally:
+            shutil.rmtree(folder, ignore_errors=True)
+
     def test_a_marker_summary_counts_the_repeats_inside_its_six_seconds(self):
         ev = event(101.0, text="RegQueryValue HKCU\\A", proc="x.exe")
         for ts in (102.0, 105.0, 107.0, 120.0):
