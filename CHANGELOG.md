@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.8.1
 
 - Bastard 1.8.1 keeps ETW listing for the whole trace, lists ProcMon network rows as Network, and keeps its helpers out of WMI and Windows.
 - Fixed ETW listing only the first moment of a trace and holding up Stop for ten seconds.
