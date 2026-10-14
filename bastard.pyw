@@ -1,4 +1,5 @@
 import bisect
+import collections
 import configparser
 import csv
 import ctypes
@@ -25,7 +26,7 @@ import tkinter as tk
 import tkinter.font as tkfont
 from tkinter import filedialog, messagebox, ttk
 
-VERSION = "1.10.1"
+VERSION = "1.10.2"
 
 APP_NAME = "Bastard"
 IS_WIN = os.name == "nt"
@@ -810,6 +811,8 @@ class Hub:
                 self.seq += 1
                 ev = Event(ts, self.seq, source, kind, level, pid or None, proc, text, detail)
                 if key is not None:
+                    if len(self.repeats) >= STORE_LIMIT:
+                        self.repeats = {}
                     self.repeats[key] = ev
         if first is not None:
             if grown and writer is not None:
@@ -872,7 +875,8 @@ class LogWriter:
         self.max_bytes = max_bytes
         self.written = 0
         self.dropped = 0
-        self.left = []
+        self.left = collections.deque()
+        self.settled = 0
         self.capped = False
         self.kept = {}
 
@@ -934,6 +938,8 @@ class LogWriter:
                         or self.written >= self.room + LOG_SYSTEM_ROOM):
                     self.dropped += 1
                     self.left.append(ev)
+                    if len(self.left) > STORE_LIMIT:
+                        self.settled += self.left.popleft().count
                     continue
                 rows = ev.log_lines()
                 self.written += log_bytes("\n".join(rows) + "\n")
@@ -963,7 +969,8 @@ class LogWriter:
             except Exception:
                 pass
             self.handle = None
-        missed = sum(ev.count for ev in self.left) + sum(ev.count - self.count_of(ev) for ev in self.events)
+        missed = self.settled + sum(ev.count for ev in list(self.left))
+        missed += sum(ev.count - self.count_of(ev) for ev in self.events)
         if missed:
             footer.append("%s left out: the log reached its %d MB limit"
                           % (plural(missed, "later event"), self.max_bytes // (1024 * 1024)))
@@ -3189,7 +3196,7 @@ class EtwRawSource(Source):
                 provider = ETW_GUID_NAMES.get(str(header.get("ProviderId") or "").upper(), "")
             parts = []
             for key, value in data.items():
-                if key in ETW_SKIP_KEYS:
+                if key in ETW_SKIP_KEYS or value == {}:
                     continue
                 text = one_line(value, 160)
                 if text:
@@ -4655,6 +4662,11 @@ class App:
                 self.root.after_cancel(job)
         self.rebuild_job = None
         self.reload_job = None
+        try:
+            while True:
+                self.hub.ui.get_nowait()
+        except queue.Empty:
+            pass
         children = self.tree.get_children()
         if children:
             self.tree.delete(*children)
@@ -4831,11 +4843,6 @@ class App:
     def start_trace(self):
         if self.closing or (self.session is not None and not self.session.finished.is_set()):
             return
-        try:
-            while True:
-                self.hub.ui.get_nowait()
-        except queue.Empty:
-            pass
         self._reset_view()
         self.marker_count = 0
         self._show_detail(DETAIL_HINT)

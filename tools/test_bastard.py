@@ -586,6 +586,17 @@ class NewSources(unittest.TestCase):
         self.assertEqual(ev.who(), "Photos.exe (PID 4321)")
         self.assertEqual(b.process_exclusion_from(ev), "ETW | | process=Photos.exe")
 
+    def test_an_etw_row_with_no_fields_names_its_event(self):
+        header = {"ProcessId": 4321, "TimeStamp": filetime(time.time()),
+                  "ProviderId": "{315A8872-923E-4EA2-9889-33CD4754BF64}"}
+        bare = self.etw_event({"EventHeader": header, "Task Name": "MICROSOFT-WINDOWS-IMMERSIVE-SHELL",
+                               "Description": "", "EventExtendedData": {}})
+        self.assertEqual(bare.text, "[Immersive-Shell] event 12")
+        shell = dict(header, ProviderId="{30336ED4-E327-447C-9DE0-51B652C86108}")
+        named = self.etw_event({"EventHeader": shell, "Task Name": "MICROSOFT-WINDOWS-SHELL-CORE", "Description": "",
+                                "pszFilePath": "C:\\Windows\\img0.jpg", "EventExtendedData": {}})
+        self.assertEqual(named.text, "[Shell-Core] pszFilePath=C:\\Windows\\img0.jpg")
+
     def test_trace_tools_rows_keep_the_time_they_happened(self):
         folder = tempfile.mkdtemp(prefix="bastard_trace_")
         try:
@@ -2032,6 +2043,22 @@ class Timeline(unittest.TestCase):
         hub.reset([b.SRC_FILES])
         self.assertEqual((hub.repeats, hub.marks, hub.bumped), ({}, [], set()))
 
+    def test_the_hub_counts_repeats_for_no_more_rows_than_the_list_can_hold(self):
+        saved = b.STORE_LIMIT
+        try:
+            b.STORE_LIMIT = 3
+            hub = b.Hub()
+            now = time.time()
+            rows = [hub.emit(b.SRC_FILES, b.KIND_FILE, "File changed: %d.txt" % index, b.CHANGE, ts=now + index)
+                    for index in range(5)]
+            self.assertLessEqual(len(hub.repeats), 3)
+            self.assertIs(hub.emit(b.SRC_FILES, b.KIND_FILE, "File changed: 4.txt", b.CHANGE, ts=now + 6), rows[4])
+            again = hub.emit(b.SRC_FILES, b.KIND_FILE, "File changed: 0.txt", b.CHANGE, ts=now + 7)
+            self.assertIsNot(again, rows[0])
+            self.assertEqual((rows[0].count, rows[4].count, again.count), (1, 2, 1))
+        finally:
+            b.STORE_LIMIT = saved
+
     def test_the_trace_log_shows_a_repeat_once_at_its_first_time(self):
         folder = tempfile.mkdtemp()
         try:
@@ -2097,6 +2124,33 @@ class Timeline(unittest.TestCase):
             self.assertNotIn("late.txt", text)
             self.assertIn("%d later events left out" % (writer.dropped + 4), text)
         finally:
+            shutil.rmtree(folder, ignore_errors=True)
+
+    def test_the_footer_still_counts_every_repeat_without_holding_every_row_left_out(self):
+        folder = tempfile.mkdtemp()
+        saved = b.STORE_LIMIT
+        try:
+            b.STORE_LIMIT = 5
+            path = os.path.join(folder, "t.log")
+            hub = b.Hub()
+            writer = b.LogWriter(path, ["Header"], b.LOG_FOOTER_ROOM + 2000)
+            self.assertTrue(writer.start())
+            hub.writer = writer
+            now = time.time()
+            for index in range(60):
+                hub.emit(b.SRC_FILES, b.KIND_FILE, "File changed: %02d %s" % (index, "x" * 80), b.CHANGE, ts=now)
+            for step in range(3):
+                hub.emit(b.SRC_FILES, b.KIND_FILE, "File changed: 59 %s" % ("x" * 80), b.CHANGE, ts=now + 1 + step)
+            self.assertTrue(writer.flush(5.0))
+            self.assertTrue(writer.capped)
+            self.assertGreater(writer.dropped, 5)
+            self.assertLessEqual(len(writer.left), 5)
+            writer.close(["Summary"], True)
+            with open(path, encoding="utf-8") as fh:
+                text = fh.read()
+            self.assertIn("%d later events left out" % (writer.dropped + 3), text)
+        finally:
+            b.STORE_LIMIT = saved
             shutil.rmtree(folder, ignore_errors=True)
 
     def test_repeats_after_the_log_is_full_never_crowd_out_the_closing_lines(self):
@@ -2632,6 +2686,17 @@ class Window(unittest.TestCase):
         app.hub.emit(b.SRC_REG, b.KIND_REG, "HKCU\\Software\\After", b.CHANGE, ts=now + 99)
         app._drain()
         self.assertEqual(len(app.tree.get_children()), 1)
+
+    def test_rows_not_yet_listed_when_clear_is_pressed_stay_out_of_the_list(self):
+        scale = b.setup_style(self.root)
+        app = b.App(self.root, b.parse_options([]), scale)
+        now = time.time()
+        app.hub.emit(b.SRC_REG, b.KIND_REG, "HKCU\\Software\\Before", b.CHANGE, ts=now)
+        app.clear_timeline()
+        after = app.hub.emit(b.SRC_REG, b.KIND_REG, "HKCU\\Software\\After", b.CHANGE, ts=now + 1)
+        app._drain()
+        self.assertEqual(app.tree.get_children(), (str(after.seq),))
+        self.assertEqual(len(app.store.events()), 1)
 
     def test_the_clear_button_sits_between_filter_and_options(self):
         scale = b.setup_style(self.root)

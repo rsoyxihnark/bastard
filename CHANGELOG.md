@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.10.2
+
+- Bastard 1.10.2 no longer takes more and more memory in a long trace, keeps Clear from bringing back older rows, and tidies the ETW rows.
+- Fixed Bastard taking more and more memory the longer a trace ran.
+- Fixed rows from just before Clear turning up in the event list after it.
+- Fixed ETW rows ending in an empty EventExtendedData={}.
+- An ETW row with nothing else to show now names its event, such as [Immersive-Shell] event 147.
+
 ## 1.10.1
 
 - Bastard 1.10.1 keeps the ProcMon summary and Trace stopped in a trace log that has reached its limit, however often rows repeat.
