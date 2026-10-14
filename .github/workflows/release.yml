@@ -35,6 +35,12 @@ jobs:
       - name: Check the source rules
         run: python tools/check_source.py
 
+      - name: Bring the published release notes in line with the changelog
+        if: github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python tools/sync_release_notes.py
+
       - name: Install the dependencies
         run: |
           python --version

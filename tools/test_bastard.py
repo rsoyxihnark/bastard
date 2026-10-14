@@ -1,3 +1,4 @@
+import contextlib
 import importlib
 import importlib.machinery
 import importlib.util
@@ -7,6 +8,7 @@ import os
 import queue
 import random
 import shutil
+import subprocess
 import sys
 import tempfile
 import threading
@@ -31,6 +33,10 @@ if selftest is None:
     sys.path.insert(0, HERE)
     selftest = importlib.import_module("run_selftest")
 SELFTEST_WORK = "C:\\Users\\RUNNER~1\\AppData\\Local\\Temp\\%sab12cd34\\watched" % selftest.WORK_PREFIX
+gate = importlib.import_module("release_gate")
+source_check = importlib.import_module("check_source")
+notes_sync = importlib.import_module("sync_release_notes")
+ROOT = os.path.dirname(HERE)
 
 
 def event(ts, source="Files", kind="File", level="change", text="x", proc="", pid=None, seq=None):
@@ -197,6 +203,40 @@ class EventLog(unittest.TestCase):
         self.assertEqual(b.decode_tool_output(b"\xff\xfe" + "ab".encode("utf-16-le")), "ab")
         self.assertEqual(b.short_channel("Microsoft-Windows-Shell-Core/Operational"), "Shell-Core/Operational")
 
+    def test_a_log_whose_newest_entry_cannot_be_read_waits_for_it(self):
+        class Source(b.EventLogSource):
+            def __init__(self):
+                self.channels = ["Application", "System"]
+                self.last = {}
+                self.failures = 0
+                self.one_by_one = False
+                self.newest = {"Application": [10], "System": [None, None, 50]}
+                self.asked = []
+
+            def _newest(self, channel):
+                values = self.newest[channel]
+                return values.pop(0) if len(values) > 1 else values[0]
+
+            def _query(self, selects, count):
+                self.asked.append(list(selects))
+                return [], ""
+
+        source = Source()
+        for channel in source.channels:
+            source.last[channel] = source._newest(channel)
+        source._poll()
+        source._poll()
+        application = ("Application", "*[System[(EventRecordID > 10)]]")
+        self.assertEqual(source.asked, [[application], [application, ("System", "*[System[(EventRecordID > 50)]]")]])
+        real = b.EventLogSource.__new__(b.EventLogSource)
+        real.tool = "wevtutil"
+        saved = b.run_hidden
+        try:
+            b.run_hidden = lambda cmd, _timeout: b.subprocess.CompletedProcess(cmd, 5, b"", b"Access is denied.")
+            self.assertIsNone(real._newest("System"))
+        finally:
+            b.run_hidden = saved
+
 
 class ProcMon(unittest.TestCase):
     def test_digest(self):
@@ -256,6 +296,52 @@ class ProcMon(unittest.TestCase):
         finally:
             shutil.rmtree(folder, ignore_errors=True)
 
+    def test_network_rows_keep_their_protocol(self):
+        class Ev:
+            def __init__(self, operation, protocol, path):
+                self.event_class = type("C", (), {"name": "Network" if protocol else "File System"})()
+                self.operation = type("O", (), {"csv_name": operation, "name": operation})()
+                self.network_protocol = protocol
+                self.result = 0
+                self.date_filetime = b.FILETIME_EPOCH + 10000000
+                self.process = type("P", (), {"process_name": "app.exe", "pid": 500})()
+                self.path = path
+
+        rows = [Ev("Send", "TCP", "10.0.0.2:50000 -> 10.0.0.9:443"), Ev("Receive", "UDP", "10.0.0.2:53 -> 10.0.0.9:53"),
+                Ev("WriteFile", "", "C:\\x.txt")]
+
+        class Reader:
+            def __init__(self, _fh, **_options):
+                pass
+
+            def __len__(self):
+                return len(rows)
+
+            def __getitem__(self, index):
+                return rows[index]
+
+        folder = tempfile.mkdtemp()
+        saved = (b.ProcmonLogsReader, b.procmon_result_text)
+        try:
+            pml = os.path.join(folder, "x.pml")
+            with open(pml, "wb") as fh:
+                fh.write(b"x")
+            b.ProcmonLogsReader = Reader
+            b.procmon_result_text = lambda _value: "SUCCESS"
+            source = b.ProcMonSource.__new__(b.ProcMonSource)
+            source.pml = pml
+            source.session = type("S", (), {"abort_event": b.threading.Event(), "user_sid": "",
+                                            "devices": b.DeviceMap()})()
+            source.status = lambda *_args, **_options: None
+            digest = b.ProcmonDigest(1, 100)
+            ok, _info = source._read_pml(digest)
+            self.assertTrue(ok)
+            found = [(row[3], row[6]) for row in digest.ordered()]
+            self.assertEqual(found, [("TCP Send", b.KIND_NET), ("UDP Receive", b.KIND_NET), ("WriteFile", b.KIND_FILE)])
+        finally:
+            b.ProcmonLogsReader, b.procmon_result_text = saved
+            shutil.rmtree(folder, ignore_errors=True)
+
 
 class NewSources(unittest.TestCase):
     def test_reg_helpers_guard(self):
@@ -266,8 +352,8 @@ class NewSources(unittest.TestCase):
         names = [cls.name for cls in b.SOURCE_TYPES]
         for wanted in (b.SRC_ETW, b.SRC_WMI, b.SRC_PROBE, b.SRC_TRACE):
             self.assertIn(wanted, names)
-        self.assertEqual(b.ETW_GUID_NAMES["{70EB4F03-C1DE-4F73-A051-33D13D541355}"], "Kernel-Registry")
         self.assertEqual(b.ETW_GUID_NAMES["{70EB4F03-C1DE-4F73-A051-33D13D5413BD}"], "Kernel-Registry")
+        self.assertNotIn("{70EB4F03-C1DE-4F73-A051-33D13D541355}", b.ETW_GUID_NAMES)
 
     def test_wmi_watches_the_user_keys_where_wmi_can_see_them(self):
         self.assertEqual(b.wmi_reg_target("HKEY_CURRENT_USER", "Control Panel\\Desktop", "S-1-5-21-7"),
@@ -410,6 +496,160 @@ class NewSources(unittest.TestCase):
         finally:
             b.PROGRAM_DIR = saved
             shutil.rmtree(folder, ignore_errors=True)
+
+    def test_a_missing_service_is_not_a_warning(self):
+        replies = {"Dwm": (1060, "[SC] EnumQueryServicesStatus:OpenService FAILED 1060:"),
+                   "Themes": (0, "SERVICE_NAME: Themes\n        STATE              : 4  RUNNING")}
+        hub = b.Hub()
+        saved = b.run_text
+        try:
+            b.run_text = lambda cmd, _timeout: replies.get(cmd[-1], (0, "        STATE              : 1  STOPPED"))
+            b.ProbeSource(FakeSession(hub))._services()
+        finally:
+            b.run_text = saved
+        rows = {ev.text.split(" ")[0]: ev for ev in drained(hub) if ev.text != "J: services"}
+        self.assertEqual(rows["Dwm"].text, "Dwm is not installed as a service")
+        self.assertEqual(rows["Dwm"].level, b.INFO)
+        self.assertEqual(rows["Themes"].level, b.INFO)
+        self.assertEqual(rows["AppXSvc"].level, b.WARN)
+
+    def test_rows_about_our_own_helpers_are_left_out(self):
+        class Proc:
+            def __init__(self, pid):
+                self.pid = pid
+
+            def parent(self):
+                return None
+
+        class Hit:
+            def __init__(self, pid, ppid, name):
+                self.ProcessId = pid
+                self.ParentProcessId = ppid
+                self.Name = name
+                self.CommandLine = name
+
+        session = FakeSession(b.Hub())
+        hits = [Hit(4321, 100, "sc.exe"), Hit(4400, 640, "notepad.exe"), Hit(4500, 200, "conhost.exe")]
+
+        def watcher(timeout_ms=0):
+            if hits:
+                return hits.pop(0)
+            session.stop_event.set()
+            return None
+
+        class Module:
+            @staticmethod
+            def WMI(**_options):
+                process = type("Process", (), {"watch_for": staticmethod(lambda _kind: watcher)})
+                return type("Connection", (), {"Win32_Process": process})()
+
+        class Com:
+            @staticmethod
+            def CoInitialize():
+                return None
+
+            @staticmethod
+            def CoUninitialize():
+                return None
+
+        class Windows(b.WindowsSource):
+            def __init__(self, hub, owners):
+                self.hub = hub
+                self.session = FakeSession(hub)
+                self.shown = {}
+                self.dialogs = {}
+                self.last_front = None
+                self.failures = 0
+                self.owners = owners
+                user = type("User", (), {"GetAncestor": staticmethod(lambda hwnd, _flag: hwnd)})()
+                self.api = type("Api", (), {"user": user, "get_long": staticmethod(lambda _hwnd, _index: 0)})()
+
+            def _text(self, hwnd):
+                return "Window %d" % hwnd
+
+            def _class(self, _hwnd):
+                return "Frame"
+
+            def _owner(self, hwnd):
+                return self.owners[hwnd]
+
+            def _when(self, _ms):
+                return time.time()
+
+            def _dialog_texts(self, _hwnd):
+                return []
+
+        saved = (b.wmi_module, b.pythoncom, b.psutil, b.OWN_TREE)
+        try:
+            b.wmi_module, b.pythoncom = Module, Com
+            b.psutil = type("Psutil", (), {"Process": Proc})
+            b.OWN_TREE = b.OwnTree(100)
+            b.OWN_TREE.note(200, 100, None, "powershell.exe")
+            b.OWN_TREE.note(300, 100, None, "Procmon64.exe")
+            wmi = b.WmiSource(session)
+            wmi.timeout_exc = None
+            wmi._proc_watch()
+            windows = Windows(session.hub, {1: (300, "Procmon64.exe", ""), 2: (900, "explorer.exe", "")})
+            for kind in (b.EVENT_OBJECT_CREATE, b.EVENT_OBJECT_SHOW, b.EVENT_SYSTEM_FOREGROUND,
+                         b.EVENT_SYSTEM_DIALOGSTART, b.EVENT_SYSTEM_DIALOGEND, b.EVENT_OBJECT_DESTROY):
+                for hwnd in (1, 2):
+                    windows._on_event(None, kind, hwnd, 0, 0, 0, 0)
+        finally:
+            b.wmi_module, b.pythoncom, b.psutil, b.OWN_TREE = saved
+        events = drained(session.hub)
+        self.assertEqual(windows.failures, 0)
+        self.assertEqual([ev.text for ev in events if ev.source == b.SRC_WMI],
+                         ["WMI saw a new process: notepad.exe (PID 4400)"])
+        shown = [ev.text for ev in events if ev.source == b.SRC_WIN]
+        self.assertEqual(len(shown), 6, shown)
+        self.assertTrue(all(text.endswith("Window 2 (explorer.exe)") for text in shown), shown)
+
+    def test_a_program_whose_parent_id_was_reused_is_not_ours(self):
+        class Proc:
+            parents = {5000: None, 4600: 200}
+
+            def __init__(self, pid):
+                self.pid = pid
+
+            def ppid(self):
+                return 1234 if self.pid == 5000 else self.parents.get(self.pid, 0)
+
+            def parent(self):
+                found = self.parents.get(self.pid)
+                return Proc(found) if found else None
+
+        saved = (b.psutil, b.OWN_TREE)
+        try:
+            b.psutil = type("Psutil", (), {"Process": Proc})
+            b.OWN_TREE = b.OwnTree(100)
+            b.OWN_TREE.note(1234, 100, None, "sc.exe")
+            b.OWN_TREE.note(200, 100, None, "powershell.exe")
+            self.assertFalse(b.ours(5000, "explorer.exe"))
+            self.assertTrue(b.ours(4600, "conhost.exe"))
+            self.assertTrue(b.ours(1234, "sc.exe"))
+            self.assertTrue(b.ours(7000, "x.exe", 100))
+            self.assertFalse(b.ours(7000, "x.exe", 0))
+            self.assertFalse(b.ours(0))
+        finally:
+            b.psutil, b.OWN_TREE = saved
+
+    def test_a_folder_in_another_profile_is_outside_yours(self):
+        values = {"Desktop": "C:\\Users\\Alice\\Desktop", "AppData": "C:\\Users\\Ali\\AppData\\Roaming",
+                  "Local AppData": "C:\\Users\\Ali", "My Pictures": "D:\\Pictures"}
+        hub = b.Hub()
+        saved = (b.reg_read_value, os.environ.get("USERPROFILE"))
+        try:
+            b.reg_read_value = lambda _hive, path, name: values.get(name) if path.endswith("User Shell Folders") else None
+            os.environ["USERPROFILE"] = "C:\\Users\\Ali"
+            b.ProbeSource(FakeSession(hub))._shell_folders()
+        finally:
+            b.reg_read_value = saved[0]
+            if saved[1] is None:
+                os.environ.pop("USERPROFILE", None)
+            else:
+                os.environ["USERPROFILE"] = saved[1]
+        levels = {ev.text.split("[")[1].split("]")[0]: ev.level for ev in drained(hub) if "[" in ev.text}
+        self.assertEqual(levels, {"Desktop": b.WARN, "AppData": b.INFO, "Local AppData": b.INFO, "My Pictures": b.WARN})
 
 
 class Timeline(unittest.TestCase):
@@ -1039,17 +1279,38 @@ class Timeline(unittest.TestCase):
             self.assertFalse(rules.blocks(source, level, text), text)
         self.assertEqual(rules.blocked, 0)
 
+    def test_the_selftest_holds_etw_to_the_test_files(self):
+        saved = selftest.IS_WIN
+        try:
+            selftest.IS_WIN = True
+            checks = {name: (ok, hard) for name, ok, hard, _info in selftest.check({"admin": True}, {}, 0)}
+        finally:
+            selftest.IS_WIN = saved
+        self.assertEqual(checks["ETW saw the test files"], (False, True))
+        self.assertEqual(checks["ETW saw the test key"], (False, False))
+        folder = tempfile.mkdtemp(prefix="bastard_applog_")
+        saved_env = os.environ.get("LOCALAPPDATA")
+        try:
+            os.environ["LOCALAPPDATA"] = folder
+            os.makedirs(os.path.join(folder, "Bastard"))
+            with open(selftest.app_log_path(), "w", encoding="utf-8") as fh:
+                fh.write("a\nETW read 5 events by Stop\nb\nETW read 9 events in all\n")
+            self.assertEqual(selftest.app_log_lines(("ETW read",)), ["ETW read 5 events by Stop", "ETW read 9 events in all"])
+        finally:
+            if saved_env is None:
+                os.environ.pop("LOCALAPPDATA", None)
+            else:
+                os.environ["LOCALAPPDATA"] = saved_env
+            shutil.rmtree(folder, ignore_errors=True)
+
     def test_etw_hears_the_providers_it_names_and_knows_a_write(self):
         guids = {}
         for name, guid, _kernel in b.ETW_RAW_PROVIDERS:
             guids.setdefault(name, []).append(guid)
-        self.assertEqual(guids["Kernel-Registry"], ["{70EB4F03-C1DE-4F73-A051-33D13D5413BD}",
-                                                    "{70EB4F03-C1DE-4F73-A051-33D13D541355}"])
-        self.assertEqual(guids["Shell-Core"], ["{30336ED4-E327-447C-9DE0-51B652C86108}",
-                                               "{30336ED4-E327-447C-9DE0-51B2E6059F02}"])
-        self.assertEqual(guids["Immersive-Shell"], ["{315A8872-923E-4EA2-9889-33CD4754BF64}",
-                                                    "{BC2C92D8-8DB4-4F8B-8D29-8F3A3A0BF1A4}"])
-        self.assertEqual(guids["Themes"], ["{7B67BEC2-6E2F-4A68-B7E4-9D3E9A4C4C8F}"])
+        self.assertEqual(guids, {"Kernel-Registry": ["{70EB4F03-C1DE-4F73-A051-33D13D5413BD}"],
+                                 "Kernel-File": ["{EDD08927-9CC4-4E65-B970-C2560FB5C289}"],
+                                 "Shell-Core": ["{30336ED4-E327-447C-9DE0-51B652C86108}"],
+                                 "Immersive-Shell": ["{315A8872-923E-4EA2-9889-33CD4754BF64}"]})
 
         class Quiet:
             admin = True
@@ -1062,6 +1323,7 @@ class Timeline(unittest.TestCase):
                 def __init__(self, name, guid, level, keywords):
                     self.name = name
                     self.guid = guid
+                    self.keywords = keywords
 
         hub = b.Hub(b.Exclusions(b.DEFAULT_EXCLUSIONS))
         source = b.EtwRawSource(Quiet(hub))
@@ -1072,7 +1334,10 @@ class Timeline(unittest.TestCase):
         finally:
             b.etw_core, b.EtwGuid = saved_core
         self.assertEqual([provider.guid for provider in providers], [guid for _n, guid, _k in b.ETW_RAW_PROVIDERS])
-        self.assertEqual(used, ["Kernel-Registry", "Kernel-File", "Shell-Core", "Immersive-Shell", "Themes"])
+        self.assertEqual(used, ["Kernel-Registry", "Kernel-File", "Shell-Core", "Immersive-Shell"])
+        self.assertEqual({provider.name: provider.keywords for provider in providers},
+                         {"Kernel-Registry": 0x4304, "Kernel-File": 0x1C00, "Shell-Core": 0xffffffffffffffff,
+                          "Immersive-Shell": 0xffffffffffffffff})
         source.own_pid = 1
         source.failures = 0
         stamp = int(time.time() * 10000000) + b.FILETIME_EPOCH
@@ -1121,6 +1386,190 @@ class Timeline(unittest.TestCase):
         self.assertIn("renamed.jpg", seen[3].text)
         self.assertIn("over.jpg", seen[4].text)
         self.assertNotIn("t.pml", " ".join(ev.text for ev in seen))
+
+    def test_etw_asks_windows_only_for_the_changes(self):
+        registry = {"SetSecurityKey": 0x4, "SetValueKey": 0x100, "DeleteValueKey": 0x200, "DeleteKey": 0x4000}
+        files = {"KERNEL_FILE_KEYWORD_DELETE_PATH": 0x400, "KERNEL_FILE_KEYWORD_RENAME_SETLINK_PATH": 0x800,
+                 "KERNEL_FILE_KEYWORD_CREATE_NEW_FILE": 0x1000}
+        self.assertEqual(b.ETW_KEYWORDS["Kernel-Registry"], sum(registry.values()))
+        self.assertEqual(b.ETW_KEYWORDS["Kernel-File"], sum(files.values()))
+        for left_out in (0x1000, 0x2000, 0x400, 0x40):
+            self.assertFalse(b.ETW_KEYWORDS["Kernel-Registry"] & left_out, hex(left_out))
+        for left_out in (0x10, 0x20, 0x40, 0x80, 0x100, 0x200):
+            self.assertFalse(b.ETW_KEYWORDS["Kernel-File"] & left_out, hex(left_out))
+
+    def test_etw_writes_what_it_read_into_the_app_log(self):
+        class Job:
+            def stop(self):
+                return None
+
+        hub = b.Hub()
+        source = b.EtwRawSource(FakeSession(hub))
+        source.own_pid = -1
+        moment = time.time() - 3
+        source._on((5, {"EventHeader": {"ProcessId": 4321, "TimeStamp": filetime(moment)},
+                        "ProviderName": "Kernel-Registry", "ValueName": "WallPaper"}))
+        source._on("not an event")
+        self.assertEqual(source.read, 2)
+        self.assertAlmostEqual(source.newest, moment, delta=0.01)
+        source.job = Job()
+        with self.assertLogs("bastard", "INFO") as logs:
+            source.finish()
+        wanted = "ETW read 2 events, the newest from %s" % b.clock(source.newest)
+        self.assertTrue(any(wanted + " by Stop" in line for line in logs.output), logs.output)
+        self.assertTrue(any(wanted + " in all, and took" in line for line in logs.output), logs.output)
+
+    def test_etw_says_it_needs_administrator_when_windows_refuses_it(self):
+        class Refused(OSError):
+            winerror = 5
+
+        class Core:
+            class ProviderInfo:
+                def __init__(self, name, guid, level, keywords):
+                    self.name = name
+
+            class TraceProperties:
+                pass
+
+            class ETW:
+                def __init__(self, **_options):
+                    pass
+
+                def control_stop(self, _properties):
+                    return None
+
+                def start(self):
+                    raise Refused("Access is denied.")
+
+        found = []
+        for admin in (False, True):
+            hub = b.Hub()
+            session = FakeSession(hub)
+            session.admin = admin
+            source = b.EtwRawSource(session)
+            saved = (b.etw_core, b.EtwGuid)
+            try:
+                b.etw_core, b.EtwGuid = Core, str
+                source._run()
+            finally:
+                b.etw_core, b.EtwGuid = saved
+            notes = [(ev.text, ev.level) for ev in drained(hub) if ev.source == b.SRC_SYSTEM]
+            found.append((hub.snapshot()[0][b.SRC_ETW], notes))
+        self.assertEqual(found[0], (("off", "needs administrator"), [("ETW: needs Bastard to run as administrator", b.WARN)]))
+        self.assertEqual(found[1], (("failed", "Access is denied."),
+                                    [("ETW: the ETW session could not start: Access is denied.", b.ERROR)]))
+
+    def test_the_administrator_notices_name_all_of_etw(self):
+        with io.open(SOURCE, "r", encoding="utf-8") as fh:
+            text = fh.read()
+        self.assertNotIn("kernel ETW", text)
+        self.assertIn('"ETW and Trace Tools are off"', text)
+        self.assertIn('"ETW and Trace Tools need administrator rights.', text)
+
+    def test_the_closing_system_lines_still_reach_a_full_log(self):
+        folder = tempfile.mkdtemp(prefix="bastard_close_")
+        try:
+            path = os.path.join(folder, "trace.log")
+            limit = 200 * 1024
+            writer = b.LogWriter(path, ["header"], limit)
+            self.assertTrue(writer.start())
+            now = time.time()
+            for index in range(3000):
+                writer.put(event(now + index * 0.001, b.SRC_PM, b.KIND_FILE, b.INFO, "ReadFile C:\\data\\%05d.bin" % index))
+            self.assertTrue(writer.flush(30.0))
+            self.assertTrue(writer.capped)
+            writer.put(event(now + 10, b.SRC_PM, b.KIND_FILE, b.INFO, "ReadFile C:\\data\\after.bin"))
+            writer.put(event(now + 11, b.SRC_SYSTEM, b.KIND_SYS, b.INFO, "ProcMon: read 1802554 events, listed 3000 of 3000"))
+            writer.put(event(now + 12, b.SRC_SYSTEM, b.KIND_MARK, b.MARK,
+                             "Marker 1: ProcMon listed 40 events in the 6 seconds after it"))
+            writer.put(event(now + 13, b.SRC_SYSTEM, b.KIND_SYS, b.INFO, "Trace stopped after 32 seconds"))
+            writer.close(["Summary"], True)
+            with open(path, "r", encoding="utf-8") as fh:
+                body = fh.read()
+            for text in ("ProcMon: read 1802554 events", "Marker 1: ProcMon listed 40 events", "Trace stopped after 32 seconds"):
+                self.assertIn(text, body)
+            self.assertNotIn("after.bin", body)
+            self.assertLess(os.path.getsize(path), limit)
+        finally:
+            shutil.rmtree(folder, ignore_errors=True)
+
+    def test_marker_summaries_do_not_crowd_out_the_closing_lines(self):
+        folder = tempfile.mkdtemp(prefix="bastard_marks_")
+        try:
+            path = os.path.join(folder, "trace.log")
+            limit = 200 * 1024
+            writer = b.LogWriter(path, ["header"], limit)
+            self.assertTrue(writer.start())
+            now = time.time()
+            for index in range(3000):
+                writer.put(event(now + index * 0.001, b.SRC_PM, b.KIND_FILE, b.INFO, "ReadFile C:\\data\\%05d.bin" % index))
+            self.assertTrue(writer.flush(30.0))
+            self.assertTrue(writer.capped)
+            detail = "\n".join("12:00:%02d.000  Files      File changed: C:\\Users\\me\\%s.txt" % (index, "x" * 80)
+                               for index in range(60))
+            for number in range(1, 21):
+                summary = event(now + 20 + number, b.SRC_SYSTEM, b.KIND_MARK, b.MARK,
+                                "Marker %d: 60 events in the 6 seconds after it (Files 60)" % number)
+                summary.detail = detail
+                writer.put(summary)
+            writer.put(event(now + 50, b.SRC_SYSTEM, b.KIND_SYS, b.INFO, "Trace stopped after 32 seconds"))
+            writer.close(["Summary"], True)
+            with open(path, "r", encoding="utf-8") as fh:
+                body = fh.read()
+            self.assertIn("Trace stopped after 32 seconds", body)
+            self.assertNotIn("(Files 60)", body)
+            self.assertLess(os.path.getsize(path), limit)
+        finally:
+            shutil.rmtree(folder, ignore_errors=True)
+
+    def test_rows_from_a_finished_trace_stay_out_of_the_next_one(self):
+        hub = b.Hub(b.Exclusions([]))
+        hub.reset(b.SOURCE_NAMES)
+        old = b.EtwRawSource(FakeSession(hub))
+        self.assertIsNotNone(old.emit(b.KIND_ETW, "row of the first trace"))
+        hub.closed = True
+        hub.reset(b.SOURCE_NAMES)
+        drained(hub)
+        new = b.EtwRawSource(FakeSession(hub))
+        self.assertIsNone(old.emit(b.KIND_ETW, "late row of the first trace"))
+        self.assertIsNone(old.note("late note of the first trace"))
+        old.status("failed", "late")
+        self.assertIsNotNone(new.emit(b.KIND_ETW, "row of the second trace"))
+        status, counts = hub.snapshot()
+        self.assertEqual(status[b.SRC_ETW], ("idle", ""))
+        self.assertEqual(counts, {b.SRC_ETW: 1})
+        self.assertEqual([ev.text for ev in drained(hub)], ["row of the second trace"])
+        self.assertEqual(hub.late, 0)
+
+    def test_closing_during_a_trace_closes_procmon_first(self):
+        class Recorder(b.Source):
+            def __init__(self, session, name, order):
+                b.Source.__init__(self, session)
+                self.name = name
+                self.order = order
+
+            def finish(self):
+                self.order.append(self.name)
+
+        folder = tempfile.mkdtemp(prefix="bastard_close_order_")
+        saved = b.PROGRAM_DIR
+        others = [name for name in b.SOURCE_NAMES if name != b.SRC_PM]
+        try:
+            b.PROGRAM_DIR = folder
+            for abort, first in ((True, b.SRC_PM), (False, b.SOURCE_NAMES[0])):
+                order = []
+                session = b.Session(b.Hub(b.Exclusions([])), b.parse_options([]))
+                session.sources = [Recorder(session, name, order) for name in b.SOURCE_NAMES]
+                if abort:
+                    session.abort_event.set()
+                session.request_stop()
+                session.finish()
+                self.assertEqual(order[0], first, order)
+                self.assertEqual([name for name in order if name != b.SRC_PM], others)
+                self.assertEqual(sorted(order), sorted(b.SOURCE_NAMES))
+        finally:
+            b.PROGRAM_DIR = saved
+            shutil.rmtree(folder, ignore_errors=True)
 
     def test_registry_rights_names(self):
         self.assertEqual(b.reg_rights_name(0xF003F), "FullControl")
@@ -1570,6 +2019,18 @@ class Processes(unittest.TestCase):
             self.assertTrue(b.same_process(mine))
             self.assertIs(b.process_table(table)[os.getpid()], mine)
 
+    def test_a_kernel_exit_names_the_program_in_full(self):
+        now = time.time()
+        source = self.source()
+        source.session.devices = b.DeviceMap()
+        source.etw_started(3999011, 0, "eventcreate.exe", now - 1.0, "")
+        source.etw_exited(3999011, 0, "eventcreate.ex", now)
+        b.PROCESS_NAMES.put(3999012, "notepad.exe")
+        source.etw_exited(3999012, 0, "RuntimeBroker.", now)
+        self.assertEqual(len(source.seen), 3, source.seen)
+        self.assertTrue(source.seen[1].startswith("Exited eventcreate.exe (PID 3999011)"), source.seen)
+        self.assertTrue(source.seen[2].startswith("Exited RuntimeBroker. (PID 3999012)"), source.seen)
+
 
 class Window(unittest.TestCase):
     def setUp(self):
@@ -1594,7 +2055,13 @@ class Window(unittest.TestCase):
         shutil.rmtree(self.home, ignore_errors=True)
 
     def test_a_window_left_on_a_screen_left_of_the_main_one_still_starts(self):
-        self.assertIn(b.geometry_fits(self.root, "1200x800+-1500+40"), (True, False))
+        saved = b.screen_box
+        try:
+            b.screen_box = lambda _root: (-1920, 0, 3840, 1080)
+            self.assertTrue(b.geometry_fits(self.root, "1200x800+-1500+40"))
+            self.assertFalse(b.geometry_fits(self.root, "1200x800+-2500+40"))
+        finally:
+            b.screen_box = saved
         self.assertFalse(b.geometry_fits(self.root, "1200x800--1500+40"))
         with open(b.SETTINGS_PATH, "w", encoding="utf-8") as fh:
             json.dump({"geometry": "1440x880+-1920+100", "sort": ["time"], "show": 1e999}, fh)
@@ -2034,6 +2501,109 @@ class Window(unittest.TestCase):
             self.assertTrue(app.flash_text.startswith("Left out from now on: "), app.flash_text)
         finally:
             b.save_exclusions = saved
+
+
+class ReleaseNotes(unittest.TestCase):
+    def test_only_the_notes_that_differ_are_rewritten(self):
+        changelog = ("# Changelog\n\n## Unreleased\n\n- Coming.\n\n## 1.1.0\n\n- New one.\n- Two.\n\n"
+                     "## 1.0.0\n\n- First.\n")
+        releases = [{"tag": "v1.1.0", "body": "- Old one.\n- Two.\n", "draft": False},
+                    {"tag": "v1.0.0", "body": "- First.\r\n", "draft": False},
+                    {"tag": "v0.9.0", "body": "- Gone.\n", "draft": False},
+                    {"tag": "v1.2.0", "body": "- Draft.\n", "draft": True},
+                    {"tag": "nightly", "body": "x", "draft": False}]
+        changes, missing = notes_sync.plan(changelog, releases)
+        self.assertEqual(changes, [("v1.1.0", "- New one.\n- Two.\n")])
+        self.assertEqual(missing, ["v0.9.0"])
+
+    def test_the_notes_read_the_changelog_the_way_the_gate_does(self):
+        with open(os.path.join(ROOT, "CHANGELOG.md"), "r", encoding="utf-8") as fh:
+            text = fh.read()
+        self.assertEqual(notes_sync.sections(text), {name: entries for name, entries in gate.sections(text)})
+        self.assertEqual(notes_sync.notes(["One.", "Two."]), "- One.\n- Two.\n")
+
+    def test_the_workflow_brings_the_notes_in_line_after_the_source_rules(self):
+        with open(os.path.join(ROOT, ".github", "workflows", "release.yml"), "r", encoding="utf-8") as fh:
+            text = fh.read()
+        sync = text.index("python tools/sync_release_notes.py")
+        self.assertLess(text.index("name: Check the source rules"), sync)
+        self.assertLess(sync, text.index("name: Install the dependencies"))
+        step = text[text.rindex("- name:", 0, sync):sync]
+        self.assertIn("if: github.ref == 'refs/heads/main'", step)
+        self.assertIn("GH_TOKEN: ${{ github.token }}", step)
+
+
+class SourceCheck(unittest.TestCase):
+    def test_an_unreadable_old_file_is_still_checked_around_its_broken_line(self):
+        text = "\n".join(['def f():', '    "a docstring"', '    x = "%s"' % ("y" * 300), "    z = ('a', {b}')",
+                          "    return x  # note", ""])
+        report = source_check.Report()
+        source_check.check_python("OldDevelopments/x.py", text, report, strict=False)
+        self.assertEqual(sorted(error.split(": ", 1)[0] for error in report.errors),
+                         ["OldDevelopments/x.py:2", "OldDevelopments/x.py:3", "OldDevelopments/x.py:5"])
+        self.assertEqual([note.split(": ", 1)[0] for note in report.notes], ["OldDevelopments/x.py:4"])
+        strict = source_check.Report()
+        source_check.check_python("bastard.pyw", text, strict)
+        self.assertEqual(len(strict.errors), 1)
+
+    def test_a_try_left_without_its_except_is_skipped_on_its_own(self):
+        text = "\n".join(["for item in range(3):", "    try:", "        a = item  # note", "    except Exception:",
+                          "        pass", "    try:", "        b = item", "c = 2", ""])
+        report = source_check.Report()
+        source_check.check_python("OldDevelopments/y.py", text, report, strict=False)
+        self.assertEqual([note.split(": ", 1)[0] for note in report.notes], ["OldDevelopments/y.py:6"])
+        self.assertEqual([error.split(": ", 1)[0] for error in report.errors], ["OldDevelopments/y.py:3"])
+
+
+class ReleaseGate(unittest.TestCase):
+    def git(self, folder, *args):
+        env = dict(os.environ, GIT_AUTHOR_NAME="Test", GIT_COMMITTER_NAME="Test", GIT_AUTHOR_EMAIL="",
+                   GIT_COMMITTER_EMAIL="")
+        result = subprocess.run(["git", "-c", "commit.gpgsign=false", "-c", "tag.gpgsign=false"] + list(args),
+                                cwd=folder, env=env, capture_output=True, text=True, check=True)
+        return result.stdout.strip()
+
+    def commit(self, folder, version, sections, subject):
+        with open(os.path.join(folder, "bastard.pyw"), "w", encoding="utf-8", newline="\n") as fh:
+            fh.write('VERSION = "%s"\n' % version)
+        with open(os.path.join(folder, "CHANGELOG.md"), "w", encoding="utf-8", newline="\n") as fh:
+            fh.write("# Changelog\n" + "".join("\n## %s\n\n- %s\n" % pair for pair in sections))
+        self.git(folder, "add", "-A")
+        self.git(folder, "commit", "-q", "-m", subject, "-m", "- " + sections[0][1])
+        return self.git(folder, "rev-parse", "HEAD")
+
+    def gate(self, folder, before, after):
+        here = os.getcwd()
+        out = io.StringIO()
+        saved = os.environ.pop("GITHUB_OUTPUT", None)
+        try:
+            os.chdir(folder)
+            with contextlib.redirect_stdout(out):
+                code = gate.main(["--before", before, "--after", after, "--notes", os.path.join(folder, "notes.md")])
+        finally:
+            os.chdir(here)
+            if saved is not None:
+                os.environ["GITHUB_OUTPUT"] = saved
+        return code, out.getvalue()
+
+    def test_a_version_must_be_above_the_newest_release(self):
+        folder = tempfile.mkdtemp(prefix="bastard_gate_")
+        try:
+            self.git(folder, "init", "-q", ".")
+            first = self.commit(folder, "1.8.0", [("1.8.0", "Bastard 1.8.0 is out.")], "[1.8.0] Bastard: ship it")
+            self.git(folder, "tag", "v1.8.0")
+            lower = self.commit(folder, "1.7.0", [("1.7.0", "Bastard 1.7.0 again."), ("1.8.0", "Bastard 1.8.0 is out.")],
+                                "[1.7.0] Bastard: go back")
+            code, out = self.gate(folder, first, lower)
+            self.assertEqual(code, 1, out)
+            self.assertIn("version 1.7.0 is not above the newest release, 1.8.0", out)
+            higher = self.commit(folder, "1.8.1", [("1.8.1", "Bastard 1.8.1 fixes it."), ("1.8.0", "Bastard 1.8.0 is out.")],
+                                 "[1.8.1] Bastard: fix it")
+            code, out = self.gate(folder, lower, higher)
+            self.assertEqual(code, 0, out)
+            self.assertIn("Version 1.8.1 will be published", out)
+        finally:
+            shutil.rmtree(folder, ignore_errors=True)
 
 
 if __name__ == "__main__":

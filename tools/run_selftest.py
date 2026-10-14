@@ -186,8 +186,22 @@ def check(result, log, returncode):
         add("%s source ran" % extra, state[0] not in ("", "failed"), hard=False,
             info="%s %s" % (state[0], state[1]))
     if IS_WIN and result.get("admin"):
+        add("ETW saw the test files", result.get("etw_test_file"))
         add("ETW saw the test key", result.get("etw_test_key"), hard=False)
     return checks
+
+
+def app_log_path():
+    return os.path.join(os.environ.get("LOCALAPPDATA", ""), "Bastard", "Bastard.log")
+
+
+def app_log_lines(marks, keep=6):
+    try:
+        with open(app_log_path(), "r", encoding="utf-8", errors="replace") as fh:
+            found = [line.rstrip() for line in fh if any(mark in line for mark in marks)]
+    except OSError:
+        return []
+    return found[-keep:]
 
 
 def main(argv):
@@ -238,6 +252,8 @@ def main(argv):
     for name, count in sorted(result.get("counts", {}).items()):
         print("  %-10s %d events" % (name, count))
     print("Actions: " + json.dumps(log))
+    for line in app_log_lines(("ETW read", "ETW raw trace")):
+        print("Bastard.log: " + line)
     failed = 0
     for name, ok, hard, info in check(result, log, returncode):
         mark = "PASS" if ok else ("FAIL" if hard else "NOTE")
@@ -257,7 +273,7 @@ def main(argv):
                 shutil.copy2(path, os.path.join(keep, name))
         if result.get("log_path") and os.path.isfile(result["log_path"]):
             shutil.copy2(result["log_path"], os.path.join(keep, os.path.basename(result["log_path"])))
-        app_log = os.path.join(os.environ.get("LOCALAPPDATA", ""), "Bastard", "Bastard.log")
+        app_log = app_log_path()
         if os.path.isfile(app_log):
             shutil.copy2(app_log, os.path.join(keep, "Bastard.log"))
     shutil.rmtree(work, ignore_errors=True)

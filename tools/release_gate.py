@@ -5,6 +5,7 @@ import sys
 
 SUBJECT_RE = re.compile(r"^\[(\d+\.\d+\.\d+|no release)\] \S")
 VERSION_RE = re.compile(r'^VERSION = "(\d+\.\d+\.\d+)"\r?$', re.M)
+TAG_RE = re.compile(r"^v(\d+\.\d+\.\d+)$")
 HEADING_RE = re.compile(r"^## (.+?)\s*$")
 EXEMPT_PREFIXES = ("tools/", ".github/", ".cl" "aude/", "OldDevelopments/", "archive/")
 EXEMPT_FILES = ("CL" "AUDE.md", "README.md", "COMPARISON.md", ".gitignore")
@@ -34,6 +35,16 @@ def source_version(commit):
         return None
     found = VERSION_RE.findall(text)
     return found[0] if len(found) == 1 else "unreadable"
+
+
+def version_key(text):
+    return tuple(int(part) for part in text.split("."))
+
+
+def newest_release():
+    found = [TAG_RE.match(tag) for tag in git("tag", "-l", "v*").split()]
+    versions = [match.group(1) for match in found if match]
+    return max(versions, key=version_key) if versions else None
 
 
 def sections(text):
@@ -128,6 +139,9 @@ def check_commit(commit, problems):
         problems.append("the commit body and the CHANGELOG.md section for %s do not say the same thing" % wanted)
     if git("tag", "-l", "v" + wanted).strip():
         problems.append("version %s has already been released" % wanted)
+    newest = newest_release()
+    if newest and version_key(wanted) <= version_key(newest):
+        problems.append("version %s is not above the newest release, %s" % (wanted, newest))
     return wanted, body.strip()
 
 

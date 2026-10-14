@@ -8,6 +8,7 @@ import tokenize
 
 LIMIT = 248
 ENTRY_GOAL = 140
+REPAIR_LIMIT = 20
 EXEMPT_PREFIXES = ("archive/", ".cl" "aude/")
 OLD_PREFIX = "OldDevelopments/"
 EXEMPT_FILES = ("CL" "AUDE.md",)
@@ -71,20 +72,78 @@ def docstring_nodes(tree):
                 yield body[0]
 
 
+def failed_line(exc):
+    if isinstance(exc, SyntaxError):
+        return exc.lineno or 0
+    if len(exc.args) > 1 and isinstance(exc.args[1], tuple) and exc.args[1]:
+        return exc.args[1][0] or 0
+    return 0
+
+
+def indent_of(line):
+    return len(line) - len(line.lstrip())
+
+
+def open_try(lines, number):
+    depth = indent_of(lines[number - 1])
+    closed = set()
+    for index in range(number - 2, -1, -1):
+        text = lines[index].strip()
+        if not text:
+            continue
+        level = indent_of(lines[index])
+        if level < depth:
+            break
+        if text.startswith(("except", "finally")):
+            closed.add(level)
+        elif text.startswith("try:"):
+            if level not in closed:
+                return index + 1
+            closed.discard(level)
+    return number
+
+
+def readable_python(text):
+    lines = text.split("\n")
+    skipped = []
+    while True:
+        attempt = "\n".join(lines)
+        try:
+            tokens = list(tokenize.generate_tokens(io.StringIO(attempt).readline))
+            return attempt, tokens, ast.parse(attempt), skipped, None
+        except (tokenize.TokenError, SyntaxError) as exc:
+            number = failed_line(exc)
+            if 0 < number <= len(lines) and "'except' or 'finally'" in str(getattr(exc, "msg", "")):
+                number = open_try(lines, number)
+            if not 0 < number <= len(lines) or not lines[number - 1].strip() or len(skipped) >= REPAIR_LIMIT:
+                return None, None, None, skipped, exc
+            lines[number - 1] = ""
+            skipped.append(number)
+
+
 def check_python(path, text, report, strict=True):
-    unreadable = report.error if strict else report.note
-    try:
-        tokens = list(tokenize.generate_tokens(io.StringIO(text).readline))
-    except (tokenize.TokenError, SyntaxError) as exc:
-        unreadable(path, 0, "could not be read as Python: %s" % exc)
-        return
+    tree = None
+    if strict:
+        try:
+            tokens = list(tokenize.generate_tokens(io.StringIO(text).readline))
+        except (tokenize.TokenError, SyntaxError) as exc:
+            report.error(path, 0, "could not be read as Python: %s" % exc)
+            return
+        try:
+            tree = ast.parse(text)
+        except SyntaxError as exc:
+            report.error(path, exc.lineno, "syntax error: %s" % exc.msg)
+    else:
+        text, tokens, tree, skipped, exc = readable_python(text)
+        for number in skipped:
+            report.note(path, number, "this line could not be read as Python, so the rest of the file was checked without it")
+        if text is None:
+            report.note(path, failed_line(exc), "could not be read as Python: %s" % exc)
+            return
     for token in tokens:
         if token.type == tokenize.COMMENT:
             report.error(path, token.start[0], "code comment")
-    try:
-        tree = ast.parse(text)
-    except SyntaxError as exc:
-        unreadable(path, exc.lineno, "syntax error: %s" % exc.msg)
+    if tree is None:
         return
     for node in docstring_nodes(tree):
         report.error(path, node.lineno, "docstring")

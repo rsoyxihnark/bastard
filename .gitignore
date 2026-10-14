@@ -8,3 +8,4 @@ venv/
 release_notes.md
 Exclusions.ini
 Bastard_*.log
+selftest/

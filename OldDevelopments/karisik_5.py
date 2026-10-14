@@ -1136,17 +1136,17 @@ def collector_winrt(stop):
         "$ErrorActionPreference='SilentlyContinue';"
         "try {"
         "  [void][Windows.System.UserProfile.UserProfilePersonalizationSettings,"
-        "Windows.System.UserProfile, ContentType=WindowsRuntime];"
+        "Windows.System.UserProfile, ContentType=WindowsRuntime];" +
         "  $s=[Windows.System.UserProfile.UserProfilePersonalizationSettings]"
         "::IsSupported();"
         "  Write-Output ('IsSupported=' + $s);"
-        "} catch { Write-Output ('ERR:' + $_.Exception.Message) }"
+        "} catch { Write-Output ('ERR:' + $_.Exception.Message) }" +
         "try {"
         "  $img=[Windows.System.UserProfile.LockScreen,"
         "Windows.System.UserProfile, ContentType=WindowsRuntime]"
         "::OriginalImageFile;"
         "  Write-Output ('LockScreenOriginalImageFile=' + $img);"
-        "} catch { Write-Output ('ERR2:' + $_.Exception.Message) }"
+        "} catch { Write-Output ('ERR2:' + $_.Exception.Message) }" +
         "try {"
         "  $pkg=Get-AppxPackage Microsoft.Windows.Photos | "
         "Select-Object Name,Status,Version,PackageFullName | "

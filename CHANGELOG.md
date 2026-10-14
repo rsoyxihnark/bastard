@@ -1,5 +1,24 @@
 # Changelog
 
+## Unreleased
+
+- Bastard 1.8.1 keeps ETW listing for the whole trace, lists ProcMon network rows as Network, and keeps its helpers out of WMI and Windows.
+- Fixed ETW listing only the first moment of a trace and holding up Stop for ten seconds.
+- ETW now lists only the Kernel-Registry rows for values set or deleted and keys deleted or given new rights.
+- ETW now lists only the Kernel-File rows for files created, renamed or deleted.
+- ETW now writes how many events it read, and the time of the newest, into Bastard.log.
+- Fixed ETW showing as failed with a Problem row when Bastard was not run as administrator.
+- Fixed the administrator notices saying only the kernel ETW providers need administrator, when all of ETW does.
+- Fixed ProcMon listing network rows as File, without TCP or UDP in front of Send, Receive or Connect.
+- Fixed the Exited line in Processes cutting a long program name short, such as eventcreate.ex for eventcreate.exe.
+- Fixed WMI and Windows listing the helpers Bastard starts, such as sc.exe, PowerShell and ProcMon.
+- Fixed Probes warning about the state of Dwm and ShellExperienceHost, which are not services.
+- Fixed Probes counting a shell folder in another user's profile as inside yours when that user's name began with yours.
+- Fixed Event Log filling a trace with the oldest entries of a log whose newest entry could not be read at Start.
+- Fixed the trace log leaving out the ProcMon summary and Trace stopped once it had reached its limit.
+- Fixed rows from the previous trace turning up in a trace started soon after it, such as late ETW or Probes rows.
+- Closing the window during a trace now closes ProcMon first.
+
 ## 1.8.0
 
 - Bastard 1.8.0 starts again on a side screen, hears the ETW providers it names, and lets a filter rule name a process.
@@ -60,7 +79,7 @@
 - Fixed Bastard writing four registry values of its own while it read the rights on Control Panel Desktop.
 - Reading the rights on Control Panel Desktop now makes a trace a second quicker and 9000 events lighter.
 - The rows ProcMon writes for opening, closing, asking after and listing a registry key are left out by default.
-- A denied registry open still shows, and so does every value that was written, read or created.
+- ProcMon keeps listing a denied registry open, and every registry value that was written, read or created.
 - ProcMon no longer lists what Bastard and the tools it starts were doing, and the summary says how many it left out.
 - The colour rule now names the path the rows actually carry, so the colour reads are left out again.
 
@@ -165,7 +184,6 @@
 - Probes now read NoLockScreen and NoChangingLockScreen under the user, next to the machine ones they already read.
 - Probes now read NoSaveSettings, which keeps Explorer from saving what the user changes.
 - Probes now report the Desktop, AppData, Local AppData and Pictures folders, and warn when one is outside the user profile.
-- A redirected AppData folder moves the theme folders Bastard watches, so it is worth seeing.
 
 ## 1.2.2
 
@@ -174,10 +192,10 @@
 ## 1.2.1
 
 - Bastard 1.2.1 keeps the quiet sources in the timeline when ETW, ProcMon and Trace Tools flood it.
-- The reads from the loud sources can fill at most four fifths of the timeline, so the other events always have room.
+- Reads from ETW, ProcMon and Trace Tools can fill at most four fifths of the timeline, so other events always have room.
 - Denials and registry and file writes now keep their place in the timeline, however many reads arrive.
 - Fixed a flood of reads filling the timeline, so every later event, markers and Trace stopped included, was only in the log.
-- A trace with a million events now finishes in seconds instead of minutes, because the timeline is put in time order when it is read.
+- A trace with a million events now finishes in seconds instead of minutes.
 
 ## 1.2.0
 
@@ -187,17 +205,16 @@
 - ProcMon now also lists its network operations, next to the file, registry and process ones.
 - Trace Tools now lists every row logman or WPR captured, not only the personalization ones.
 - The timeline now holds up to a million events in memory.
-- Bastard still leaves out only its own work and the ProcMon helper, so the trace does not feed on itself.
 
 ## 1.1.0
 
 - Bastard 1.1.0 reads every channel the earlier versions read and shows all of it unfiltered, so you can sift the noise yourself.
-- ETW follows the Kernel-Registry, Kernel-File, Shell-Core, Immersive-Shell and Themes providers live and lists their events.
+- ETW follows the Kernel-Registry, Kernel-File, Shell-Core and Immersive-Shell providers live and lists their events.
 - ProcMon now also lists reads and lookups on the wallpaper, theme, Photos and lock screen paths, not only writes and denials.
 - ProcMon no longer groups repeats, so every captured operation shows on its own line.
 - Registry now also watches the LogonUI background, the ActivatableClasses packages, the Personalization policies and the System policies.
 - Files now also watches the Explorer folder under Local AppData and reports every change the moment it arrives.
-- Windows now records a line when a window is first created, on top of in front, opened, shown and closed.
+- Windows now also lists Window created when a window is first made, next to In front, Window opened and Window closed.
 - WMI reports new processes and wallpaper value changes the way Windows itself sees them.
 - Probes reads the personalization and app privacy policies, the consent store, DisallowRun, image options, services and permissions at start.
 - Probes reads the Set as desktop background menu entry, the image file associations and the Photos package name, version and status.

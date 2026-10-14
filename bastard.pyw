@@ -635,6 +635,17 @@ OWN_SLACK = 0.5
 OWN_TREE = OwnTree(os.getpid())
 
 
+def ours(pid, name="", ppid=None):
+    if not pid:
+        return False
+    if OWN_TREE.holds(pid, None, name):
+        return True
+    if ppid is None and psutil is not None:
+        parent = _safe(lambda: psutil.Process(pid).parent())
+        ppid = parent.pid if parent is not None else 0
+    return bool(ppid) and OWN_TREE.holds(ppid)
+
+
 class Event:
     __slots__ = ("ts", "seq", "source", "kind", "level", "pid", "proc", "text", "detail")
 
@@ -732,6 +743,7 @@ class Hub:
         self.bad_times = set()
         self.closed = False
         self.late = 0
+        self.generation = 0
 
     def emit(self, source, kind, text, level=INFO, pid=None, proc="", detail="", ts=None):
         if self.closed and source != SRC_SYSTEM:
@@ -773,6 +785,7 @@ class Hub:
 
     def reset(self, sources):
         with self.lock:
+            self.generation += 1
             self.counts = {}
             self.closed = False
             self.late = 0
@@ -840,7 +853,9 @@ class LogWriter:
                 if isinstance(ev, threading.Event):
                     reached.append(ev)
                     continue
-                if self.room and self.written >= self.room:
+                if self.room and self.written >= self.room and (
+                        ev.source != SRC_SYSTEM or (ev.kind == KIND_MARK and ev.detail)
+                        or self.written >= self.room + LOG_SYSTEM_ROOM):
                     self.dropped += 1
                     continue
                 rows = ev.log_lines()
@@ -942,6 +957,7 @@ class Store:
 
 DEFAULT_LOG_MB = 28
 LOG_FOOTER_ROOM = 65536
+LOG_SYSTEM_ROOM = 32768
 TRACE_LOG_KEEP = 5
 TRACE_LOG_RE = re.compile(r"^Bastard_\d{8}_\d{6}\.log$")
 LOG_NEWLINE = "\r\n" if IS_WIN else "\n"
@@ -1178,20 +1194,30 @@ def sample_events(events, limit):
 
 class Source:
     name = ""
+    generation = None
 
     def __init__(self, session):
         self.session = session
         self.hub = session.hub
         self.threads = []
+        self.generation = self.hub.generation
+
+    def current(self):
+        return self.generation is None or self.generation == self.hub.generation
 
     def emit(self, kind, text, level=INFO, pid=None, proc="", detail="", ts=None):
+        if not self.current():
+            return None
         return self.hub.emit(self.name, kind, text, level, pid, proc, detail, ts)
 
     def note(self, text, level=INFO, detail=""):
+        if not self.current():
+            return None
         return self.hub.emit(SRC_SYSTEM, KIND_SYS, "%s: %s" % (self.name, text), level, detail=detail)
 
     def status(self, state, note=""):
-        self.hub.set_status(self.name, state, note)
+        if self.current():
+            self.hub.set_status(self.name, state, note)
 
     def stopping(self):
         return self.session.stop_event.is_set()
@@ -1896,9 +1922,9 @@ class ProcessSource(Source):
             self.ended[pid] = ts
             started = self.reported.get(pid)
         info = self.known.get(pid)
-        name = os.path.basename(self.session.devices.to_dos(image)) if image else ""
-        if not name:
-            name = info["name"] if info else PROCESS_NAMES.get(pid)
+        short = os.path.basename(self.session.devices.to_dos(image)) if image else ""
+        known = info["name"] if info else PROCESS_NAMES.get(pid)
+        name = known if known and known.lower().startswith(short.lower()) else short
         if started is None and info is not None:
             started = info["ctime"]
         lived = ts - started if started else None
@@ -2148,6 +2174,8 @@ class WindowsSource(Source):
                     return
                 title = self._text(hwnd)
                 pid, name, host = self._owner(hwnd)
+                if ours(pid, name):
+                    return
                 label = title or "(%s)" % (self._class(hwnd) or "window")
                 self.emit(KIND_WIN, "Window created: %s%s" % (label, self._suffix(name)), INFO, pid=pid,
                           proc=name, detail=self._detail(hwnd, title, host), ts=self._when(ms))
@@ -2171,6 +2199,8 @@ class WindowsSource(Source):
                 if old is not None and old[0] == title:
                     return
                 pid, name, host = self._owner(hwnd)
+                if ours(pid, name):
+                    return
                 if len(self.shown) > 4000:
                     self.shown.clear()
                 self.shown[hwnd] = (title, pid, name)
@@ -2183,6 +2213,8 @@ class WindowsSource(Source):
                     return
                 self.last_front = (hwnd, title)
                 pid, name, host = self._owner(hwnd)
+                if ours(pid, name):
+                    return
                 label = title or "(%s window)" % (self._class(hwnd) or "untitled")
                 self.emit(KIND_WIN, "In front: %s%s" % (label, self._suffix(name)), INFO, pid=pid, proc=name,
                           detail=self._detail(hwnd, title, host), ts=self._when(ms))
@@ -2190,6 +2222,8 @@ class WindowsSource(Source):
             if event == EVENT_SYSTEM_DIALOGSTART:
                 title = self._text(hwnd)
                 pid, name, host = self._owner(hwnd)
+                if ours(pid, name):
+                    return
                 texts = self._dialog_texts(hwnd)
                 text = "Dialog opened: %s%s" % (title or "(untitled)", self._suffix(name))
                 if texts:
@@ -2204,6 +2238,8 @@ class WindowsSource(Source):
                 info = self.dialogs.pop(hwnd, None)
                 if info is None:
                     pid, name, _host = self._owner(hwnd)
+                    if ours(pid, name):
+                        return
                     info = (self._text(hwnd), pid, name)
                 title, pid, name = info
                 self.emit(KIND_WIN, "Dialog closed: %s%s" % (title or "(untitled)", self._suffix(name)), INFO,
@@ -2420,9 +2456,9 @@ class EventLogSource(Source):
         try:
             result = run_hidden([self.tool, "qe", channel, "/c:1", "/rd:true", "/f:xml"], 20)
         except Exception:
-            return 0
+            return None
         if result.returncode != 0:
-            return 0
+            return None
         records = parse_events_xml(decode_tool_output(result.stdout))
         return max((record["record"] for record in records), default=0)
 
@@ -2465,7 +2501,13 @@ class EventLogSource(Source):
             self._report(record, True)
 
     def _poll(self):
-        selects = [(channel, "*[System[(EventRecordID > %d)]]" % self.last.get(channel, 0)) for channel in self.channels]
+        for channel in self.channels:
+            if self.last.get(channel) is None:
+                self.last[channel] = self._newest(channel)
+        selects = [(channel, "*[System[(EventRecordID > %d)]]" % self.last[channel]) for channel in self.channels
+                   if self.last.get(channel) is not None]
+        if not selects:
+            return
         records, error = self._query(selects, 500)
         if records is None:
             self.failures += 1
@@ -2478,9 +2520,10 @@ class EventLogSource(Source):
         self.failures = 0
         for record in records:
             channel = record["channel"]
-            if channel in self.last and record["record"] <= self.last[channel]:
+            last = self.last.get(channel)
+            if last is not None and record["record"] <= last:
                 continue
-            self.last[channel] = max(self.last.get(channel, 0), record["record"])
+            self.last[channel] = max(last or 0, record["record"])
             self._report(record, False)
 
     def _report(self, record, before):
@@ -2775,6 +2818,9 @@ class ProcMonSource(Source):
                             digest.total += 1
                             continue
                         operation = getattr(ev.operation, "csv_name", None) or ev.operation.name
+                        protocol = getattr(ev, "network_protocol", "")
+                        if protocol:
+                            operation = "%s %s" % (protocol, operation)
                         result = procmon_result_text(ev.result) if procmon_result_text else str(ev.result)
                         row = (filetime_to_epoch(ev.date_filetime), ev.process.process_name, ev.process.pid,
                                operation, self._fix_path(ev.path or ""), result)
@@ -2934,15 +2980,13 @@ def run_text(cmd, timeout):
 
 ETW_RAW_PROVIDERS = (
     ("Kernel-Registry", "{70EB4F03-C1DE-4F73-A051-33D13D5413BD}", True),
-    ("Kernel-Registry", "{70EB4F03-C1DE-4F73-A051-33D13D541355}", True),
     ("Kernel-File", "{EDD08927-9CC4-4E65-B970-C2560FB5C289}", True),
     ("Shell-Core", "{30336ED4-E327-447C-9DE0-51B652C86108}", False),
-    ("Shell-Core", "{30336ED4-E327-447C-9DE0-51B2E6059F02}", False),
     ("Immersive-Shell", "{315A8872-923E-4EA2-9889-33CD4754BF64}", False),
-    ("Immersive-Shell", "{BC2C92D8-8DB4-4F8B-8D29-8F3A3A0BF1A4}", False),
-    ("Themes", "{7B67BEC2-6E2F-4A68-B7E4-9D3E9A4C4C8F}", False),
 )
 ETW_GUID_NAMES = {guid.upper(): name for name, guid, _kernel in ETW_RAW_PROVIDERS}
+ETW_KEYWORDS = {"Kernel-Registry": 0x4304, "Kernel-File": 0x1C00}
+ETW_ALL_KEYWORDS = 0xffffffffffffffff
 ETW_WRITE_MARKS = ("setvalue", "deletevalue", "deletekey", "createkey", "renamekey", "setkeysecurity", "writefile",
                    "setinformation", "setdisposition", "setrename", "deletefile", "setsecurity")
 ETW_SKIP_KEYS = frozenset(("EventHeader", "Descriptor", "ProviderId", "ProviderName", "Provider Name", "Task Name"))
@@ -2963,10 +3007,14 @@ class EtwRawSource(Source):
     name = SRC_ETW
     session_name = "Bastard ETW Trace"
     job = None
+    read = 0
+    newest = 0.0
 
     def start(self):
         self.job = None
         self.failures = 0
+        self.read = 0
+        self.newest = 0.0
         self.own_pid = os.getpid()
         if not IS_WIN:
             self.status("off", "Windows only")
@@ -2985,7 +3033,7 @@ class EtwRawSource(Source):
             if kernel and not self.session.admin:
                 continue
             try:
-                providers.append(etw_core.ProviderInfo(pname, EtwGuid(guid), 5, 0xffffffffffffffff))
+                providers.append(etw_core.ProviderInfo(pname, EtwGuid(guid), 5, ETW_KEYWORDS.get(pname, ETW_ALL_KEYWORDS)))
                 if pname not in used:
                     used.append(pname)
             except Exception as exc:
@@ -3005,6 +3053,10 @@ class EtwRawSource(Source):
             self.job.start()
         except Exception as exc:
             self.job = None
+            if getattr(exc, "winerror", None) == 5 and not self.session.admin:
+                self.status("off", "needs administrator")
+                self.note("needs Bastard to run as administrator", WARN)
+                return
             self.status("failed", one_line(exc, 60))
             self.note("the ETW session could not start: %s" % one_line(exc, 200), ERROR)
             return
@@ -3014,6 +3066,7 @@ class EtwRawSource(Source):
             self.wait(1.0)
 
     def _on(self, item):
+        self.read += 1
         try:
             event_id, data = item
         except Exception:
@@ -3026,6 +3079,8 @@ class EtwRawSource(Source):
             ts = filetime_to_epoch(raw_time) if raw_time else time.time()
             if abs(ts - time.time()) > 86400:
                 ts = time.time()
+            if ts > self.newest:
+                self.newest = ts
             pid = as_int(header.get("ProcessId"), 0) or as_int(data.get("ProcessId"), 0)
             if pid and (pid == self.own_pid or OWN_TREE.holds(pid, ts)):
                 return
@@ -3080,14 +3135,20 @@ class EtwRawSource(Source):
         except Exception as exc:
             LOG.warning("ETW raw trace did not stop cleanly: %s", exc)
 
+    def _reading(self):
+        return "%d events, the newest from %s" % (self.read, clock(self.newest) if self.newest else "none")
+
     def finish(self):
         job, self.job = self.job, None
         if job is not None:
+            LOG.info("ETW read %s by Stop", self._reading())
+            begun = time.time()
             worker = threading.Thread(target=self._stop_job, args=(job,), name="etw raw stop", daemon=True)
             worker.start()
             worker.join(10.0)
             if worker.is_alive():
                 LOG.warning("ETW raw trace is still stopping after 10 seconds")
+            LOG.info("ETW read %s in all, and took %.1f s to stop", self._reading(), time.time() - begun)
         self._stop_session()
 
 
@@ -3147,6 +3208,8 @@ class WmiSource(Source):
                     continue
                 pid = as_int(getattr(hit, "ProcessId", 0), 0)
                 name = getattr(hit, "Name", "") or ""
+                if ours(pid, name, as_int(getattr(hit, "ParentProcessId", 0), 0)):
+                    continue
                 cmd = getattr(hit, "CommandLine", "") or ""
                 detail = "Name: %s\nPID: %s\nCommand line: %s" % (name, pid, cmd)
                 self.emit(KIND_PROC, "WMI saw a new process: %s" % process_label(name, pid), INFO,
@@ -3489,6 +3552,9 @@ class ProbeSource(Source):
             if code is None:
                 self._say("sc query %s failed: %s" % (svc, out), WARN)
                 continue
+            if code == 1060:
+                self._say("%s is not installed as a service" % svc)
+                continue
             state = ""
             for line in out.splitlines():
                 if "STATE" in line:
@@ -3531,7 +3597,8 @@ class ProbeSource(Source):
                 seen += 1
                 full = os.path.expandvars(value)
                 detail = "%s\\%s\nValue: %s\nExpanded: %s" % (path, name, value, full)
-                if profile and not full.lower().startswith(profile):
+                low = full.rstrip("\\").lower()
+                if profile and low != profile and not low.startswith(profile + "\\"):
                     self._say("%s [%s] is outside the user profile: %s" % (tag, name, full), WARN, detail=detail)
                 else:
                     self._say("%s [%s] = %s" % (tag, name, full), INFO, detail=detail)
@@ -3757,7 +3824,7 @@ class Session:
                           ERROR, detail=self.log_path)
         if IS_WIN and not self.admin:
             self.hub.emit(SRC_SYSTEM, KIND_SYS, "Not running as administrator, so ProcMon, short-lived processes, "
-                          "the kernel ETW providers and Trace Tools are off", WARN)
+                          "ETW and Trace Tools are off", WARN)
         for source in self.sources:
             if self.stop_event.is_set():
                 break
@@ -3794,7 +3861,10 @@ class Session:
                     LOG.exception("%s did not stop cleanly", source.name)
             for source in self.sources:
                 source.join(2.0 if self.abort_event.is_set() else 10.0)
-            for source in self.sources:
+            order = self.sources
+            if self.abort_event.is_set():
+                order = sorted(self.sources, key=lambda source: source.name != SRC_PM)
+            for source in order:
                 try:
                     source.finish()
                 except Exception as exc:
@@ -4074,8 +4144,8 @@ def ask_admin(root, scale):
         choice["value"] = value
         window.destroy()
 
-    text = ("Bastard is not running as administrator.\n\nProcMon captures, short-lived processes, the kernel ETW "
-            "providers and Trace Tools need administrator rights. Everything else works without them.")
+    text = ("Bastard is not running as administrator.\n\nProcMon captures, short-lived processes, "
+            "ETW and Trace Tools need administrator rights. Everything else works without them.")
     tk.Label(window, text=text, justify="left", wraplength=int(420 * scale), bg=Theme.PANEL, fg=Theme.FG,
              font=("Segoe UI", 10)).pack(padx=int(24 * scale), pady=(int(20 * scale), int(14 * scale)))
     buttons = tk.Frame(window, bg=Theme.PANEL)
@@ -5019,6 +5089,8 @@ class App:
             "listed": len(self.tree.get_children()), "matching": self.match_count,
             "etw_test_key": any(ev.source == SRC_ETW and "traceselftest" in (ev.text + " " + ev.detail).lower()
                                 for ev in self.store.events()),
+            "etw_test_file": any(ev.source == SRC_ETW and "trace_selftest_" in (ev.text + " " + ev.detail).lower()
+                                 for ev in self.store.events()),
         }
         with open(self.options["selftest"], "w", encoding="utf-8") as fh:
             json.dump(result, fh, indent=1)
