@@ -126,9 +126,10 @@ class Formatting(unittest.TestCase):
 
 class Registry(unittest.TestCase):
     def test_diff(self):
-        old = ({"", "Sub", "Gone", "Gone\\Deep"}, {("", "A"): (4, 1), ("", "B"): (1, "x"), ("Gone", "V"): (4, 1),
-                                                  ("Gone\\Deep", "W"): (4, 2)})
-        new = ({"", "Sub", "New", "New\\Inner"}, {("", "A"): (4, 2), ("", "C"): (1, "y"), ("New", "N"): (4, 5)})
+        keys = {"", "Sub", "Gone", "Gone\\Deep"}
+        old = (keys, {("", "A"): (4, 1), ("", "B"): (1, "x"), ("Gone", "V"): (4, 1), ("Gone\\Deep", "W"): (4, 2)}, keys)
+        keys = {"", "Sub", "New", "New\\Inner"}
+        new = (keys, {("", "A"): (4, 2), ("", "C"): (1, "y"), ("New", "N"): (4, 5)}, keys)
         changes = b.reg_diff(old, new)
         kinds = [(c[0], c[1], c[2]) for c in changes]
         self.assertIn(("key added", "New", None), kinds)
@@ -140,6 +141,60 @@ class Registry(unittest.TestCase):
         self.assertIn(("key deleted", "Gone", None), kinds)
         self.assertNotIn(("key deleted", "Gone\\Deep", None), kinds)
         self.assertFalse(any(c[0] == "value deleted" and c[1].startswith("Gone") for c in changes))
+
+    def test_values_past_the_read_limit_are_never_reported_as_added_or_deleted(self):
+        class Handle:
+            def __init__(self, path):
+                self.path = path
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_exc):
+                return False
+
+        class Registry:
+            KEY_READ = 1
+            tree = {}
+
+            @classmethod
+            def OpenKey(cls, _hive, path, _reserved, _access):
+                if path not in cls.tree:
+                    raise OSError(path)
+                return Handle(path)
+
+            @classmethod
+            def EnumValue(cls, handle, index):
+                found = cls.tree[handle.path][0]
+                if index >= len(found):
+                    raise OSError("no more values")
+                return found[index] + (4,)
+
+            @classmethod
+            def EnumKey(cls, handle, index):
+                found = cls.tree[handle.path][1]
+                if index >= len(found):
+                    raise OSError("no more keys")
+                return found[index]
+
+        def read(tree):
+            Registry.tree = tree
+            return b.read_reg_tree(None, "Root", max_values=4)
+
+        before = {"Root": ([("r", 1)], ["B", "D"]), "Root\\B": ([("b1", 1), ("b2", 2)], []),
+                  "Root\\D": ([("d1", 1), ("d2", 2)], [])}
+        after = {**before, "Root": ([("r", 1)], ["A", "B", "D"]), "Root\\A": ([("a", 1)], [])}
+        shorter = {**before, "Root\\B": ([("b1", 1)], [])}
+        saved = b.winreg
+        try:
+            b.winreg = Registry
+            old, new, less = read(before), read(after), read(shorter)
+        finally:
+            b.winreg = saved
+        kinds = lambda changes: [(c[0], c[1], c[2]) for c in changes]
+        self.assertEqual(kinds(b.reg_diff(old, new)), [("key added", "A", None), ("value added", "A", "a")])
+        self.assertEqual(kinds(b.reg_diff(new, old)), [("key deleted", "A", None)])
+        self.assertEqual(kinds(b.reg_diff(old, less)), [("value deleted", "B", "b2")])
 
     def test_paths(self):
         self.assertEqual(b.split_reg_path("HKEY_CURRENT_USER\\Software\\X\\"), ("HKCU", "Software\\X"))
@@ -402,6 +457,49 @@ class NewSources(unittest.TestCase):
         self.assertEqual(calls[1], {"Hive": "HKEY_USERS", "KeyPath": "S-1-5-21-7\\\\Control Panel\\\\Desktop",
                                     "ValueName": "WallPaper"})
         self.assertEqual(len(calls), 1 + len(b.WMI_REG_TARGETS))
+
+    def test_a_broken_wmi_registry_watcher_waits_instead_of_spinning(self):
+        calls = []
+        first = threading.Event()
+
+        def broken(timeout_ms):
+            calls.append(timeout_ms)
+            first.set()
+            raise RuntimeError("the WMI service went away")
+
+        class Event:
+            @staticmethod
+            def watch_for(**_where):
+                return broken
+
+        class Connection:
+            RegistryValueChangeEvent = Event()
+
+        class Module:
+            @staticmethod
+            def WMI(**_options):
+                return Connection()
+
+        class Com:
+            CoInitialize = CoUninitialize = staticmethod(lambda: None)
+
+        session = FakeSession()
+        session.user_sid = "S-1-5-21-7"
+        saved = (b.wmi_module, b.pythoncom)
+        try:
+            b.wmi_module, b.pythoncom = Module, Com
+            source = b.WmiSource(session)
+            source.timeout_exc = None
+            worker = threading.Thread(target=source._reg_watch)
+            worker.start()
+            first.wait(5.0)
+            time.sleep(0.2)
+            session.stop_event.set()
+            worker.join(5.0)
+        finally:
+            b.wmi_module, b.pythoncom = saved
+        self.assertFalse(worker.is_alive())
+        self.assertLess(len(calls), 5)
 
     def test_policy_and_shell_folder_probes(self):
         names = [name for _hive, _path, name in b.PROBE_POLICY_KEYS]
@@ -2019,6 +2117,44 @@ class Processes(unittest.TestCase):
             self.assertTrue(b.same_process(mine))
             self.assertIs(b.process_table(table)[os.getpid()], mine)
 
+    def test_looking_for_procmon_reads_no_parent_ids(self):
+        asked = []
+
+        class Proc:
+            def __init__(self, pid):
+                self.pid = pid
+
+            def oneshot(self):
+                return contextlib.nullcontext()
+
+            def name(self):
+                return "Procmon64.exe" if self.pid == 7 else "other.exe"
+
+            def create_time(self):
+                return 100.0
+
+            def ppid(self):
+                asked.append(self.pid)
+                return 1
+
+        class Fake:
+            Process = Proc
+
+            @staticmethod
+            def pids():
+                return [5, 7]
+
+        source = b.ProcMonSource(FakeSession())
+        source.launched = 99.0
+        saved = b.psutil
+        try:
+            b.psutil = Fake
+            self.assertEqual(source._procmon_pids(), {7})
+            self.assertEqual(asked, [])
+            self.assertEqual(b.process_table()[5]["ppid"], 1)
+        finally:
+            b.psutil = saved
+
     def test_a_kernel_exit_names_the_program_in_full(self):
         now = time.time()
         source = self.source()
@@ -2476,6 +2612,22 @@ class Window(unittest.TestCase):
             app._rebuild()
         self.assertEqual(len(app.tree.get_children()), 0)
         self.assertEqual(app.rules.blocked, 0)
+
+    def test_a_redraw_reads_the_filter_again_only_once_it_has_changed(self):
+        scale = b.setup_style(self.root)
+        app = b.App(self.root, b.parse_options([]), scale)
+        now = time.time()
+        for index in range(20):
+            app.hub.emit(b.SRC_FILES, b.KIND_FILE, "File changed: tick%d.txt" % index, b.CHANGE, ts=now + index)
+        app._drain()
+        checked = []
+        blocks = app.rules.blocks
+        app.rules.blocks = lambda *args: checked.append(args) or blocks(*args)
+        app._rebuild()
+        self.assertEqual((checked, len(app.tree.get_children())), ([], 20))
+        app.rules.set_lines(["Files | | tick1"])
+        app._rebuild()
+        self.assertEqual((len(checked), len(app.tree.get_children())), (20, 9))
 
     def test_a_rule_from_the_menu_leaves_the_filter_switch_alone(self):
         scale = b.setup_style(self.root)

@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.8.2
+
+- Bastard 1.8.2 keeps the event list quick after a long trace and stops listing registry values that never changed.
+- Hiding a source, changing Show or searching after a long trace no longer freezes the event list, until the filter rules are changed.
+- Fixed Registry listing values as added or deleted in a large key, such as ActivatableClasses\Package, when they had not changed.
+- Fixed WMI keeping a processor core busy for the rest of a trace once its registry watcher stopped working.
+- Fixed Start, and closing ProcMon at Stop, taking longer than needed.
+
 ## 1.8.1
 
 - Bastard 1.8.1 keeps ETW listing for the whole trace, lists ProcMon network rows as Network, and keeps its helpers out of WMI and Windows.

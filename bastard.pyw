@@ -25,7 +25,7 @@ import tkinter as tk
 import tkinter.font as tkfont
 from tkinter import filedialog, messagebox, ttk
 
-VERSION = "1.8.1"
+VERSION = "1.8.2"
 
 APP_NAME = "Bastard"
 IS_WIN = os.name == "nt"
@@ -1291,6 +1291,7 @@ def split_reg_path(text):
 def read_reg_tree(hive, path, max_depth=6, max_values=5000):
     keys = set()
     values = {}
+    complete = set()
 
     def walk(sub, depth):
         full = path + "\\" + sub if sub else path
@@ -1308,6 +1309,7 @@ def read_reg_tree(hive, path, max_depth=6, max_values=5000):
                 try:
                     name, data, kind = winreg.EnumValue(handle, index)
                 except OSError:
+                    complete.add(sub)
                     break
                 values[(sub, name)] = (kind, data)
                 index += 1
@@ -1323,7 +1325,7 @@ def read_reg_tree(hive, path, max_depth=6, max_values=5000):
             walk(sub + "\\" + child if sub else child, depth + 1)
 
     walk("", 0)
-    return keys, values
+    return keys, values, complete
 
 
 def _topmost(paths):
@@ -1336,22 +1338,21 @@ def _topmost(paths):
 
 
 def reg_diff(old, new):
-    old_keys, old_values = old
-    new_keys, new_values = new
+    old_keys, old_values, old_complete = old
+    new_keys, new_values, new_complete = new
     added = _topmost(new_keys - old_keys)
     removed = _topmost(old_keys - new_keys)
-    gone = [sub.lower() for sub in old_keys - new_keys]
     order = lambda ident: (ident[0].lower(), ident[1].lower())
     out = [("key added", sub, None, None, None) for sub in added]
     for ident in sorted(new_values, key=order):
         if ident not in old_values:
-            out.append(("value added", ident[0], ident[1], None, new_values[ident]))
+            if ident[0] in old_complete or ident[0] not in old_keys:
+                out.append(("value added", ident[0], ident[1], None, new_values[ident]))
         elif old_values[ident] != new_values[ident]:
             out.append(("value changed", ident[0], ident[1], old_values[ident], new_values[ident]))
     for ident in sorted(old_values, key=order):
-        if ident in new_values or ident[0].lower() in gone:
-            continue
-        out.append(("value deleted", ident[0], ident[1], old_values[ident], None))
+        if ident not in new_values and ident[0] in new_complete:
+            out.append(("value deleted", ident[0], ident[1], old_values[ident], None))
     out.extend(("key deleted", sub, None, None, None) for sub in removed)
     return out
 
@@ -1440,7 +1441,7 @@ class RegistrySource(Source):
         watch.handle = handle
         if watch.snap is None and not initial:
             self.emit(KIND_REG, "%s created" % watch.label, CHANGE, detail="Key: " + watch.label)
-            for change in reg_diff((set(), {}), snap):
+            for change in reg_diff((set(), {}, set()), snap):
                 if change[0] != "key added" or change[1]:
                     self._report(watch, change)
         elif watch.snap is not None:
@@ -1763,7 +1764,7 @@ def same_process(info):
     return proc is None or bool(_safe(proc.is_running, True))
 
 
-def process_table(known=None):
+def process_table(known=None, parents=True):
     table = {}
     if psutil is None:
         return table
@@ -1776,7 +1777,7 @@ def process_table(known=None):
             proc = psutil.Process(pid)
             with proc.oneshot():
                 info = {"pid": pid, "name": _safe(proc.name, "") or "", "ctime": _safe(proc.create_time, 0.0) or 0.0,
-                        "ppid": _safe(proc.ppid, 0) or 0, "proc": proc}
+                        "ppid": (_safe(proc.ppid, 0) or 0) if parents else 0, "proc": proc}
         except Exception:
             continue
         table[pid] = info
@@ -1802,7 +1803,7 @@ class ProcessSource(Source):
         if psutil is None and not can_etw:
             self.status("failed", "psutil missing")
             return
-        self.known = process_table()
+        self.known = process_table(parents=False)
         for pid, info in self.known.items():
             PROCESS_NAMES.put(pid, info["name"])
         mode = "psutil"
@@ -2746,7 +2747,7 @@ class ProcMonSource(Source):
         pids = set()
         if self.proc is not None and self.proc.poll() is None:
             pids.add(self.proc.pid)
-        for pid, info in process_table().items():
+        for pid, info in process_table(parents=False).items():
             if info["name"].lower() in PROCMON_SKIP and info["ctime"] >= self.launched - 2:
                 pids.add(pid)
         return pids
@@ -3247,8 +3248,8 @@ class WmiSource(Source):
                     try:
                         hit = watcher(timeout_ms=500)
                     except Exception as exc:
-                        if self._is_timeout(exc):
-                            continue
+                        if not self._is_timeout(exc):
+                            self.wait(0.5)
                         continue
                     if hit:
                         self.emit(KIND_REG, "WMI change: %s\\%s [%s]" % (hive, path, name), CHANGE,
@@ -4176,6 +4177,8 @@ class App:
             save_exclusions(self.rules)
         self.hub = Hub(self.rules)
         self.hub.reset(SOURCE_NAMES)
+        self.rules_state = (self.rules.rules, self.rules.enabled)
+        self.rules_changed_at = 0
         self.store = Store()
         self.sort_column = ""
         self.sort_down = False
@@ -4421,7 +4424,8 @@ class App:
             return False
         if self.show_index == 2 and ev.level not in (WARN, ERROR):
             return False
-        if self.rules is not None and self.rules.blocks(ev.source, ev.level, ev.text, ev.proc, ev.detail, False):
+        if (self.rules is not None and ev.seq <= self._rules_changed()
+                and self.rules.blocks(ev.source, ev.level, ev.text, ev.proc, ev.detail, False)):
             return False
         if self.terms:
             hay = ("%s %s %s %s %s" % (ev.text, ev.proc, ev.source, ev.kind, ev.detail)).lower()
@@ -4429,6 +4433,13 @@ class App:
                 if term not in hay:
                     return False
         return True
+
+    def _rules_changed(self):
+        state = (self.rules.rules, self.rules.enabled)
+        if state != self.rules_state:
+            self.rules_state = state
+            self.rules_changed_at = self.hub.seq
+        return self.rules_changed_at
 
     def _values(self, ev):
         return (clock(ev.ts), ev.source, ev.kind, ev.proc, ev.pid or "", shorten(ev.text, 600))
