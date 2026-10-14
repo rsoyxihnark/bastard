@@ -25,7 +25,7 @@ import tkinter as tk
 import tkinter.font as tkfont
 from tkinter import filedialog, messagebox, ttk
 
-VERSION = "1.8.3"
+VERSION = "1.9.0"
 
 APP_NAME = "Bastard"
 IS_WIN = os.name == "nt"
@@ -977,6 +977,26 @@ DEFAULT_EXCLUSIONS = (
     "ProcMon | | chrome.exe",
     "| | Bastard",
     "ETW | info | Kernel-Registry",
+    "ETW | info | Shell-Core | Wallpaper",
+    "ProcMon | info | NAME NOT FOUND | Policies",
+    "ProcMon | info | NAME INVALID",
+    "ProcMon | info | BUFFER OVERFLOW",
+    "ProcMon | info | Operation: Query",
+    "ProcMon | info | ReadFile",
+    "ProcMon | info | CloseFile",
+    "ProcMon | info | IRP_MJ_",
+    "ProcMon | info | FASTIO_",
+    "ProcMon | info | CreateFileMapping",
+    "ProcMon | info | LockFile",
+    "ProcMon | info | FileSystemControl",
+    "ProcMon | info | DeviceIoControl",
+    "ProcMon | info | RegSetInfoKey",
+    "ProcMon | info | Operation: Thread",
+    "ProcMon | change | \\$Mft",
+    "ProcMon | change | \\$LogFile",
+    "ProcMon | change | \\$BitMap",
+    "ProcMon | change | \\$Directory",
+    "ProcMon | change | \\$Extend",
 )
 EXCLUSION_HELP = (
     "One rule per line: source | level | the text it holds | the text that keeps it",

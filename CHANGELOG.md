@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.9.0
+
+- Bastard 1.9.0 leaves out far more of the ProcMon and ETW rows that say nothing, so a trace and its log come out much smaller.
+- The filter now starts with the ETW Shell-Core Info rows left out, unless they name a wallpaper.
+- The filter now starts with the ProcMon rows for reading, closing, locking and mapping a file left out, such as ReadFile and CloseFile.
+- The filter now starts with the ProcMon rows that ask after a file's details left out, such as QueryOpen and QueryDirectory.
+- The filter now starts with the ProcMon thread, control and RegSetInfoKey rows left out, such as Thread Create and DeviceIoControl.
+- The filter now starts with the ProcMon NAME NOT FOUND rows left out, except the ones under Policies.
+- The filter now starts with the ProcMon BUFFER OVERFLOW and NAME INVALID rows left out.
+- The filter now starts with the ProcMon writes to the file system's own records left out, such as $Mft, $LogFile and $BitMap.
+
 ## 1.8.3
 
 - Bastard 1.8.3 keeps the event list quick after a filter rule changes and reads Exclusions.ini saved as UTF-8 with BOM.

@@ -69,6 +69,41 @@ def filetime(epoch):
     return int(epoch * 10000000) + b.FILETIME_EPOCH
 
 
+OTHER_PID = 4321 if os.getpid() != 4321 else 4325
+
+
+class QuietProcMon(b.ProcMonSource):
+    def __init__(self, hub):
+        self.hub = hub
+        self.session = type("S", (), {"markers": []})()
+        self.pml = "x.pml"
+
+    def status(self, state, note=""):
+        pass
+
+    def note(self, text, level=b.INFO, detail=""):
+        pass
+
+
+def procmon_listed(rules, rows):
+    hub = b.Hub(rules)
+    digest = b.ProcmonDigest(1, 1000)
+    now = time.time()
+    for index, (proc, operation, path, result) in enumerate(rows):
+        digest.add(now + index * 0.001, proc, OTHER_PID, operation, path, result)
+    QuietProcMon(hub)._publish(digest, "%d events" % len(rows))
+    return drained(hub)
+
+
+def etw_listed(rules, items):
+    hub = b.Hub(rules)
+    source = b.EtwRawSource(FakeSession(hub))
+    source.own_pid = -1
+    for event_id, data in items:
+        source._on((event_id, data))
+    return drained(hub)
+
+
 class Formatting(unittest.TestCase):
     def test_dword_and_qword(self):
         self.assertEqual(b.format_reg_value("x", 4, 10), "10 (0xA)")
@@ -859,15 +894,94 @@ class Timeline(unittest.TestCase):
         self.assertFalse(rules.blocks(b.SRC_TRACE, b.INFO, "logman: EventName=FileIo | Type=Read | PID=4"))
         self.assertTrue(hasattr(b.TraceToolSource, "_leave_it_to_etw"))
 
-    def test_the_defaults_are_the_twelve_the_owner_asked_for(self):
+    def test_the_defaults_are_the_thirty_two_the_owner_asked_for(self):
         rules = b.Exclusions(b.DEFAULT_EXCLUSIONS)
-        self.assertEqual(len(rules.rules), 12)
+        self.assertEqual(len(rules.rules), 32)
         self.assertTrue(rules.blocks(b.SRC_PM, b.INFO,
                                      "read RegQueryValue HKCU\\SOFTWARE\\Microsoft\\Windows\\DWM"
                                      "\\ColorPrevalence"))
         self.assertTrue(rules.blocks(b.SRC_PROBE, b.INFO, "D: DisallowRun policy"))
         self.assertTrue(rules.blocks(b.SRC_REG, b.CHANGE, "HKLM\\...\\Certificates\\Root added"))
-        self.assertFalse(rules.blocks(b.SRC_PM, b.INFO, "read QueryOpen C:\\x.dll"))
+        listed = procmon_listed(rules, [("Photos.exe", "QueryOpen", "C:\\x.dll", "SUCCESS"),
+                                        ("Photos.exe", "CreateFile", "C:\\x.dll", "SUCCESS")])
+        self.assertEqual([ev.text for ev in listed], ["CreateFile C:\\x.dll"])
+
+    def test_the_defaults_leave_out_the_procmon_rows_that_say_nothing(self):
+        gone = [
+            ("Photos.exe", "CloseFile", "C:\\Pictures\\a.jpg", "SUCCESS"),
+            ("Photos.exe", "IRP_MJ_CLOSE", "C:\\Pictures\\a.jpg", "SUCCESS"),
+            ("Photos.exe", "QueryOpen", "C:\\Pictures\\a.jpg", "FAST IO DISALLOWED"),
+            ("Photos.exe", "QueryBasicInformationFile", "C:\\Pictures\\a.jpg", "SUCCESS"),
+            ("Photos.exe", "QueryDirectory", "C:\\Pictures", "SUCCESS"),
+            ("Photos.exe", "ReadFile", "C:\\Pictures\\a.jpg", "SUCCESS"),
+            ("Photos.exe", "FASTIO_RELEASE_FOR_SECTION_SYNCHRONIZATION", "C:\\Pictures\\a.jpg", "SUCCESS"),
+            ("Photos.exe", "CreateFileMapping", "C:\\Pictures\\a.jpg", "FILE LOCKED WITH ONLY READERS"),
+            ("svchost.exe", "LockFile", "C:\\ProgramData\\State.srd-shm", "SUCCESS"),
+            ("svchost.exe", "UnlockFileSingle", "C:\\ProgramData\\State.srd-shm", "SUCCESS"),
+            ("explorer.exe", "FileSystemControl", "C:\\Users\\me", "NOT REPARSE POINT"),
+            ("explorer.exe", "DeviceIoControl", "C:\\Users\\me", "INVALID PARAMETER"),
+            ("explorer.exe", "RegSetInfoKey", "HKCU\\Control Panel\\Desktop", "SUCCESS"),
+            ("explorer.exe", "Thread Create", "", "SUCCESS"),
+            ("explorer.exe", "Thread Exit", "", "SUCCESS"),
+            ("explorer.exe", "RegQueryValue", "HKCU\\Control Panel\\Desktop\\WallPaper", "BUFFER OVERFLOW"),
+            ("ctfmon.exe", "RegQueryValue", "HKLM\\SOFTWARE\\Microsoft\\Input\\Settings\\proc_1\\Mode",
+             "NAME NOT FOUND"),
+            ("explorer.exe", "CreateFile", "C:\\Windows\\@{ms-resource:logo.png}", "NAME INVALID"),
+            ("explorer.exe", "CreateFile", "C:\\Pictures\\gone.jpg", "NAME NOT FOUND"),
+            ("System", "WriteFile", "C:\\$Mft", "SUCCESS"),
+            ("System", "WriteFile", "C:\\$LogFile", "SUCCESS"),
+            ("System", "WriteFile", "D:\\$BitMap", "SUCCESS"),
+            ("System", "WriteFile", "C:\\$Directory", "SUCCESS"),
+            ("System", "WriteFile", "C:\\$Extend\\$UsnJrnl:$J", "SUCCESS"),
+        ]
+        kept = [
+            ("explorer.exe", "RegQueryValue", "HKCU\\Control Panel\\Desktop\\WallPaper", "SUCCESS"),
+            ("explorer.exe", "RegQueryValue",
+             "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Policies\\ActiveDesktop\\NoChangingWallPaper",
+             "NAME NOT FOUND"),
+            ("explorer.exe", "RegCreateKey", "HKCU\\Control Panel\\Desktop", "SUCCESS"),
+            ("Photos.exe", "CreateFile", "C:\\Pictures\\a.jpg", "SUCCESS"),
+            ("Photos.exe", "CreateFile", "C:\\Pictures\\Old\\a.jpg", "PATH NOT FOUND"),
+            ("Photos.exe", "Load Image", "C:\\Windows\\System32\\Windows.UI.Xaml.dll", "SUCCESS"),
+            ("explorer.exe", "Process Create", "C:\\Program Files\\Tool\\tool.exe", "SUCCESS"),
+            ("explorer.exe", "SetBasicInformationFile", "C:\\Users\\me\\TranscodedWallpaper", "SUCCESS"),
+            ("explorer.exe", "WriteFile", "C:\\Users\\me\\TranscodedWallpaper", "SUCCESS"),
+            ("explorer.exe", "RegSetValue", "HKCU\\Control Panel\\Desktop\\WallPaper", "SUCCESS"),
+            ("Photos.exe", "QueryOpen", "C:\\Users\\me\\TranscodedWallpaper", "ACCESS DENIED"),
+            ("Photos.exe", "ReadFile", "C:\\Users\\me\\TranscodedWallpaper", "ACCESS DENIED"),
+        ]
+        listed = procmon_listed(b.Exclusions(b.DEFAULT_EXCLUSIONS), gone + kept)
+        wanted = procmon_listed(b.Exclusions([]), kept)
+        self.assertEqual(len(wanted), len(kept))
+        self.assertEqual([ev.text for ev in listed], [ev.text for ev in wanted])
+
+    def test_the_defaults_leave_out_the_shell_core_reads_unless_they_name_a_wallpaper(self):
+        header = {"ProcessId": OTHER_PID, "TimeStamp": filetime(time.time())}
+        gone = [
+            (22043, {"EventHeader": header, "ProviderName": "Shell-Core", "EventExtendedData": {}}),
+            (16725, {"EventHeader": header, "ProviderName": "Shell-Core",
+                     "FMTID": "{28636aa6-953d-11d2-b5d6-00c04fd918d0}", "PID": 11}),
+            (3005, {"EventHeader": header, "ProviderName": "Shell-Core"}),
+            (19403, {"EventHeader": header, "ProviderName": "Shell-Core", "Name": "D:\\Desktop\\notes.txt"}),
+        ]
+        kept = [
+            (19403, {"EventHeader": header, "ProviderName": "Shell-Core", "Name": "D:\\Desktop\\wallpaper.jpg"}),
+            (5961, {"EventHeader": header, "ProviderName": "Shell-Core", "HRESULT": "0x80070005"}),
+            (40, {"EventHeader": header, "ProviderName": "Immersive-Shell", "ZbandFrom": 2, "ZbandTo": 3}),
+        ]
+        listed = etw_listed(b.Exclusions(b.DEFAULT_EXCLUSIONS), gone + kept)
+        wanted = etw_listed(b.Exclusions([]), kept)
+        self.assertEqual(len(wanted), len(kept))
+        self.assertEqual([ev.text for ev in listed], [ev.text for ev in wanted])
+
+    def test_the_defaults_come_back_the_same_from_the_ini_file(self):
+        folder = tempfile.mkdtemp(prefix="bastard_defaults_")
+        try:
+            path = os.path.join(folder, "Exclusions.ini")
+            self.assertEqual(b.save_exclusions(b.Exclusions(b.DEFAULT_EXCLUSIONS), path), "")
+            self.assertEqual(b.load_exclusions(path).lines, list(b.DEFAULT_EXCLUSIONS))
+        finally:
+            shutil.rmtree(folder, ignore_errors=True)
 
     def test_the_defaults_leave_the_kernel_file_reads_out(self):
         rules = b.Exclusions(b.DEFAULT_EXCLUSIONS)
@@ -1793,10 +1907,10 @@ class Timeline(unittest.TestCase):
 
     def test_the_defaults_leave_the_registry_handle_rows_out(self):
         rules = b.Exclusions(b.DEFAULT_EXCLUSIONS)
-        for op in ("RegOpenKey", "RegCloseKey", "RegQueryKey", "RegEnumKey", "RegEnumValue"):
+        for op in ("RegOpenKey", "RegCloseKey", "RegQueryKey", "RegEnumKey", "RegEnumValue", "RegSetInfoKey"):
             self.assertTrue(rules.blocks(b.SRC_PM, b.INFO, "%s HKCU\\Control Panel\\Desktop" % op), op)
             self.assertFalse(rules.blocks(b.SRC_PM, b.ERROR, "%s HKLM\\x: ACCESS DENIED" % op), op)
-        for op in ("RegQueryValue", "RegCreateKey", "RegSetInfoKey"):
+        for op in ("RegQueryValue", "RegCreateKey"):
             self.assertFalse(rules.blocks(b.SRC_PM, b.INFO, "%s HKCU\\Control Panel\\Desktop" % op), op)
         self.assertFalse(rules.blocks(b.SRC_PM, b.CHANGE, "RegSetValue HKCU\\Control Panel\\Desktop [Wallpaper]"))
         self.assertFalse(rules.blocks(b.SRC_REG, b.INFO, "RegOpenKey HKCU\\Control Panel\\Desktop"))
