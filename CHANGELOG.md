@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.8.3
+
+- Bastard 1.8.3 keeps the event list quick after a filter rule changes and reads Exclusions.ini saved as UTF-8 with BOM.
+- After a filter rule is changed, hiding a source, changing Show or searching no longer freezes the event list each time.
+- Fixed Bastard ignoring Exclusions.ini, then overwriting its rules at the next Save, when the file had been saved as UTF-8 with BOM.
+
 ## 1.8.2
 
 - Bastard 1.8.2 keeps the event list quick after a long trace and stops listing registry values that never changed.

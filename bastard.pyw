@@ -25,7 +25,7 @@ import tkinter as tk
 import tkinter.font as tkfont
 from tkinter import filedialog, messagebox, ttk
 
-VERSION = "1.8.2"
+VERSION = "1.8.3"
 
 APP_NAME = "Bastard"
 IS_WIN = os.name == "nt"
@@ -1105,7 +1105,7 @@ class Exclusions:
 def rule_lines(path, plain):
     parser = configparser.ConfigParser(interpolation=None, comment_prefixes=())
     try:
-        with open(path, "r", encoding="utf-8") as fh:
+        with open(path, "r", encoding="utf-8-sig") as fh:
             text = "\n".join(line for line in fh.read().splitlines() if line[:1] not in ("#", ";"))
         parser.read_string(text, path)
         plain = parser.get("Exclusions", "rules", fallback=plain)
@@ -1121,7 +1121,7 @@ def load_exclusions(path=EXCLUSIONS_PATH):
     enabled = True
     parser = configparser.ConfigParser(interpolation=None)
     try:
-        if parser.read(path, encoding="utf-8"):
+        if parser.read(path, encoding="utf-8-sig"):
             if parser.has_section("Exclusions"):
                 lines = rule_lines(path, parser.get("Exclusions", "rules", fallback=""))
             enabled = parser.getboolean("Exclusions", "enabled", fallback=True)
@@ -4179,6 +4179,7 @@ class App:
         self.hub.reset(SOURCE_NAMES)
         self.rules_state = (self.rules.rules, self.rules.enabled)
         self.rules_changed_at = 0
+        self.rules_hidden = set()
         self.store = Store()
         self.sort_column = ""
         self.sort_down = False
@@ -4424,8 +4425,7 @@ class App:
             return False
         if self.show_index == 2 and ev.level not in (WARN, ERROR):
             return False
-        if (self.rules is not None and ev.seq <= self._rules_changed()
-                and self.rules.blocks(ev.source, ev.level, ev.text, ev.proc, ev.detail, False)):
+        if self.rules is not None and ev.seq <= self._rules_changed() and ev.seq in self.rules_hidden:
             return False
         if self.terms:
             hay = ("%s %s %s %s %s" % (ev.text, ev.proc, ev.source, ev.kind, ev.detail)).lower()
@@ -4439,7 +4439,11 @@ class App:
         if state != self.rules_state:
             self.rules_state = state
             self.rules_changed_at = self.hub.seq
+            self.rules_hidden = set(ev.seq for ev in self.store.items if self._blocked(ev))
         return self.rules_changed_at
+
+    def _blocked(self, ev):
+        return self.rules.blocks(ev.source, ev.level, ev.text, ev.proc, ev.detail, False)
 
     def _values(self, ev):
         return (clock(ev.ts), ev.source, ev.kind, ev.proc, ev.pid or "", shorten(ev.text, 600))
@@ -4555,6 +4559,7 @@ class App:
         if children:
             self.tree.delete(*children)
         self.store.clear()
+        self.rules_hidden = set()
         self.shown = []
         self.shown_times = []
         self.match_count = 0
@@ -4613,6 +4618,8 @@ class App:
             pass
         if batch:
             self.store.add(batch)
+            changed_at = self._rules_changed()
+            self.rules_hidden.update(ev.seq for ev in batch if ev.seq <= changed_at and self._blocked(ev))
             if self.rebuild_job is None:
                 self._merge(batch)
         return len(batch)

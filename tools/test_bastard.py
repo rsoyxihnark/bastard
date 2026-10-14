@@ -1931,7 +1931,7 @@ class Timeline(unittest.TestCase):
         folder = tempfile.mkdtemp(prefix="bastard_hand_")
         try:
             path = os.path.join(folder, "Exclusions.ini")
-            with open(path, "w", encoding="utf-8") as fh:
+            with open(path, "w", encoding="utf-8-sig") as fh:
                 fh.write("; a note at the top\n# another\n[Exclusions]\n# a note in the section\nenabled = no\n"
                          "rules = Files | change | a.txt\n    ; Files | change | b.txt\n\n    Files | | c.txt\n"
                          "[Options]\nmax_log_mb = 12\n")
@@ -2626,6 +2626,8 @@ class Window(unittest.TestCase):
         app._rebuild()
         self.assertEqual((checked, len(app.tree.get_children())), ([], 20))
         app.rules.set_lines(["Files | | tick1"])
+        app._rebuild()
+        self.assertEqual((len(checked), len(app.tree.get_children())), (20, 9))
         app._rebuild()
         self.assertEqual((len(checked), len(app.tree.get_children())), (20, 9))
 
