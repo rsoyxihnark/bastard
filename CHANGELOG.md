@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.10.0
+
+- Bastard 1.10.0 lists a row that repeats only once, at the time it was first seen, with its count in brackets.
+- A row seen again exactly as before now shows once in the event list and the trace log, followed by its count, such as (748 times).
+- The count of a repeated row starts again after each Marker, so the rows after a Marker still show what happened after it.
+- A row seen again after Clear is listed again as a new row with its own count.
+- The CSV export has a Count column, and the JSON export a count for each event.
+
 ## 1.9.0
 
 - Bastard 1.9.0 leaves out far more of the ProcMon and ETW rows that say nothing, so a trace and its log come out much smaller.

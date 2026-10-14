@@ -25,7 +25,7 @@ import tkinter as tk
 import tkinter.font as tkfont
 from tkinter import filedialog, messagebox, ttk
 
-VERSION = "1.9.0"
+VERSION = "1.10.0"
 
 APP_NAME = "Bastard"
 IS_WIN = os.name == "nt"
@@ -646,8 +646,12 @@ def ours(pid, name="", ppid=None):
     return bool(ppid) and OWN_TREE.holds(ppid)
 
 
+def repeat_suffix(count):
+    return " (%d times)" % count if count > 1 else ""
+
+
 class Event:
-    __slots__ = ("ts", "seq", "source", "kind", "level", "pid", "proc", "text", "detail")
+    __slots__ = ("ts", "seq", "source", "kind", "level", "pid", "proc", "text", "detail", "count", "times")
 
     def __init__(self, ts, seq, source, kind, level, pid, proc, text, detail):
         self.ts = ts
@@ -659,9 +663,26 @@ class Event:
         self.proc = proc
         self.text = text
         self.detail = detail
+        self.count = 1
+        self.times = None
 
     def key(self):
         return (self.ts, self.seq)
+
+    def repeat(self, ts):
+        if self.times is None:
+            self.times = []
+        self.times.append(ts)
+        self.count += 1
+
+    def seen_between(self, start, end):
+        found = 1 if start < self.ts <= end else 0
+        if self.times:
+            found += sum(1 for ts in self.times if start < ts <= end)
+        return found
+
+    def headline(self):
+        return self.text + repeat_suffix(self.count)
 
     def who(self):
         if self.proc and self.pid:
@@ -683,7 +704,7 @@ class Event:
         if who:
             lines.append("Process:  " + who)
         lines.append("")
-        lines.append(self.text)
+        lines.append(self.headline())
         if self.detail:
             lines.append("")
             lines.append(self.detail)
@@ -693,13 +714,13 @@ class Event:
         return {
             "time": stamp(self.ts), "epoch": round(self.ts, 6), "source": self.source, "kind": self.kind,
             "level": LEVEL_LABELS.get(self.level, self.level), "process": self.proc, "pid": self.pid,
-            "event": self.text, "detail": self.detail,
+            "event": self.text, "detail": self.detail, "count": self.count,
         }
 
     def log_lines(self):
         head = "%s  %-10s %-8s %-8s %-30s %s" % (stamp(self.ts), self.source, self.kind,
                                                 LEVEL_LABELS.get(self.level, self.level),
-                                                shorten(self.who(), 30), self.text)
+                                                shorten(self.who(), 30), self.headline())
         lines = [head]
         for index, line in enumerate(self.detail.splitlines()):
             if index >= 40:
@@ -711,23 +732,29 @@ class Event:
 
 def marker_summary(number, start, events):
     end = start + MARKER_WINDOW
-    found = [ev for ev in events if start < ev.ts <= end and ev.source != SRC_SYSTEM]
+    found = []
+    for ev in events:
+        if ev.source != SRC_SYSTEM:
+            seen = ev.seen_between(start, end)
+            if seen:
+                found.append((ev, seen))
     if not found:
         text = "Marker %d: nothing happened in the %d seconds after it" % (number, MARKER_WINDOW)
         return text, WARN, ""
     by_source = {}
     by_process = {}
-    for ev in found:
-        by_source[ev.source] = by_source.get(ev.source, 0) + 1
+    for ev, seen in found:
+        by_source[ev.source] = by_source.get(ev.source, 0) + seen
         if ev.proc:
-            by_process[ev.proc] = by_process.get(ev.proc, 0) + 1
+            by_process[ev.proc] = by_process.get(ev.proc, 0) + seen
     parts = ", ".join("%s %d" % item for item in sorted(by_source.items(), key=lambda item: (-item[1], item[0])))
-    text = "Marker %d: %s in the %d seconds after it (%s)" % (number, plural(len(found), "event"),
-                                                          MARKER_WINDOW, parts)
+    total = sum(seen for _ev, seen in found)
+    text = "Marker %d: %s in the %d seconds after it (%s)" % (number, plural(total, "event"), MARKER_WINDOW, parts)
     names = [name for name, _ in sorted(by_process.items(), key=lambda item: (-item[1], item[0]))[:4]]
     if names:
         text += ", from " + ", ".join(names)
-    detail = "\n".join("%s  %-10s %s" % (clock(ev.ts), ev.source, one_line(ev.text, 160)) for ev in found[:60])
+    detail = "\n".join("%s  %-10s %s%s" % (clock(ev.ts), ev.source, one_line(ev.text, 160), repeat_suffix(seen))
+                       for ev, seen in found[:60])
     return text, MARK, detail
 
 
@@ -744,6 +771,9 @@ class Hub:
         self.closed = False
         self.late = 0
         self.generation = 0
+        self.repeats = {}
+        self.marks = []
+        self.bumped = set()
 
     def emit(self, source, kind, text, level=INFO, pid=None, proc="", detail="", ts=None):
         if self.closed and source != SRC_SYSTEM:
@@ -762,15 +792,46 @@ class Hub:
             self.bad_times.add(source)
             LOG.warning("%s gave an event time that cannot be right (%r), so the time it arrived is used: %s",
                         source, original, one_line(text, 120))
+        grown = 0
         with self.lock:
-            self.seq += 1
-            ev = Event(ts, self.seq, source, kind, level, pid or None, proc, text, detail)
             self.counts[source] = self.counts.get(source, 0) + 1
             writer = self.writer
+            key = None
+            first = None
+            if source != SRC_SYSTEM:
+                key = (bisect.bisect_right(self.marks, ts), source, kind, level, pid or None, proc, text, detail)
+                first = self.repeats.get(key)
+            if first is not None:
+                before = len(repeat_suffix(first.count))
+                first.repeat(ts)
+                grown = len(repeat_suffix(first.count)) - before
+                self.bumped.add(first)
+            else:
+                self.seq += 1
+                ev = Event(ts, self.seq, source, kind, level, pid or None, proc, text, detail)
+                if key is not None:
+                    self.repeats[key] = ev
+        if first is not None:
+            if grown and writer is not None:
+                writer.grow(grown)
+            return first
         if writer is not None:
             writer.put(ev)
         self.ui.put(ev)
         return ev
+
+    def mark(self, moment):
+        with self.lock:
+            bisect.insort(self.marks, moment)
+
+    def split(self):
+        with self.lock:
+            self.repeats = {}
+
+    def take_bumped(self):
+        with self.lock:
+            bumped, self.bumped = self.bumped, set()
+        return bumped
 
     def set_status(self, source, state, note=""):
         with self.lock:
@@ -789,6 +850,9 @@ class Hub:
             self.counts = {}
             self.closed = False
             self.late = 0
+            self.repeats = {}
+            self.marks = []
+            self.bumped = set()
             for source in sources:
                 self.status[source] = ("idle", "")
         if self.exclusions is not None:
@@ -808,6 +872,7 @@ class LogWriter:
         self.max_bytes = max_bytes
         self.written = 0
         self.dropped = 0
+        self.left = []
         self.capped = False
 
     def start(self):
@@ -827,6 +892,9 @@ class LogWriter:
 
     def put(self, ev):
         self.queue.put(ev)
+
+    def grow(self, size):
+        self.queue.put(size)
 
     def flush(self, timeout):
         if self.thread is None or not self.thread.is_alive():
@@ -853,10 +921,14 @@ class LogWriter:
                 if isinstance(ev, threading.Event):
                     reached.append(ev)
                     continue
+                if isinstance(ev, int):
+                    self.written += ev
+                    continue
                 if self.room and self.written >= self.room and (
                         ev.source != SRC_SYSTEM or (ev.kind == KIND_MARK and ev.detail)
                         or self.written >= self.room + LOG_SYSTEM_ROOM):
                     self.dropped += 1
+                    self.left.append(ev)
                     continue
                 rows = ev.log_lines()
                 self.written += log_bytes("\n".join(rows) + "\n")
@@ -886,10 +958,11 @@ class LogWriter:
                 pass
             self.handle = None
         if self.dropped:
+            missed = sum(ev.count for ev in self.left)
             footer.append("%s left out: the log reached its %d MB limit"
-                          % (plural(self.dropped, "later event"), self.max_bytes // (1024 * 1024)))
+                          % (plural(missed, "later event"), self.max_bytes // (1024 * 1024)))
         try:
-            if rewrite:
+            if rewrite or any(ev.count > 1 for ev in self.events):
                 temp = self.path + ".tmp"
                 with open(temp, "w", encoding="utf-8", errors="replace", newline=LOG_NEWLINE) as fh:
                     fh.write("\n".join(self.header) + "\n\n")
@@ -4078,10 +4151,10 @@ def write_export(path, kind, events):
     if kind == "csv":
         with open(path, "w", encoding="utf-8-sig", newline="") as fh:
             writer = csv.writer(fh)
-            writer.writerow(["Time", "Source", "Kind", "Level", "Process", "PID", "Event", "Detail"])
+            writer.writerow(["Time", "Source", "Kind", "Level", "Process", "PID", "Event", "Detail", "Count"])
             for ev in events:
                 writer.writerow([stamp(ev.ts), ev.source, ev.kind, LEVEL_LABELS.get(ev.level, ev.level), ev.proc,
-                                 ev.pid or "", ev.text, ev.detail])
+                                 ev.pid or "", ev.text, ev.detail, ev.count])
     else:
         with open(path, "w", encoding="utf-8") as fh:
             json.dump({"bastard": VERSION, "saved": stamp(time.time()), "events": [ev.to_dict() for ev in events]},
@@ -4466,7 +4539,8 @@ class App:
         return self.rules.blocks(ev.source, ev.level, ev.text, ev.proc, ev.detail, False)
 
     def _values(self, ev):
-        return (clock(ev.ts), ev.source, ev.kind, ev.proc, ev.pid or "", shorten(ev.text, 600))
+        return (clock(ev.ts), ev.source, ev.kind, ev.proc, ev.pid or "",
+                shorten(ev.text, 600) + repeat_suffix(ev.count))
 
     def _insert(self, index, ev):
         self.tree.tk.call(str(self.tree), "insert", "", index, "-id", str(ev.seq), "-values", self._values(ev),
@@ -4642,7 +4716,22 @@ class App:
             self.rules_hidden.update(ev.seq for ev in batch if ev.seq <= changed_at and self._blocked(ev))
             if self.rebuild_job is None:
                 self._merge(batch)
+        self._recount()
         return len(batch)
+
+    def _recount(self):
+        bumped = self.hub.take_bumped()
+        if not bumped:
+            return
+        selected = set(self.tree.selection())
+        again = False
+        for ev in bumped:
+            iid = str(ev.seq)
+            if self.tree.exists(iid):
+                self.tree.item(iid, values=self._values(ev))
+                again = again or iid in selected
+        if again:
+            self._selected()
 
     def _tick(self):
         try:
@@ -4766,6 +4855,7 @@ class App:
         number = self.marker_count
         moment = time.time()
         session.markers.append((number, moment))
+        self.hub.mark(moment)
         self.hub.emit(SRC_SYSTEM, KIND_MARK, "Marker %d" % number, MARK, ts=moment)
         self.root.after(int(MARKER_DELAY * 1000), lambda: self._marker_due(session, number, moment))
 
@@ -4862,6 +4952,7 @@ class App:
             self.menu.grab_release()
 
     def clear_timeline(self):
+        self.hub.split()
         self._reset_view()
         self._show_detail("")
         self.flash("The list is cleared, the log on disk still holds everything")

@@ -1,4 +1,5 @@
 import contextlib
+import csv
 import importlib
 import importlib.machinery
 import importlib.util
@@ -1985,6 +1986,162 @@ class Timeline(unittest.TestCase):
         hub.reset(["Files"])
         self.assertEqual(hub.snapshot(), ({"Files": ("idle", "")}, {}))
 
+    def test_a_repeated_row_is_listed_once_with_its_count(self):
+        hub = b.Hub()
+        now = time.time()
+        first = hub.emit(b.SRC_PM, b.KIND_REG, "RegQueryValue HKCU\\A", pid=5, proc="x.exe", detail="Path: A", ts=now)
+        for step in (1, 2):
+            self.assertIs(hub.emit(b.SRC_PM, b.KIND_REG, "RegQueryValue HKCU\\A", pid=5, proc="x.exe",
+                                   detail="Path: A", ts=now + step), first)
+        self.assertEqual(drained(hub), [first])
+        self.assertEqual((first.ts, first.count, first.times), (now, 3, [now + 1, now + 2]))
+        self.assertEqual(first.headline(), "RegQueryValue HKCU\\A (3 times)")
+        self.assertEqual(hub.snapshot()[1], {b.SRC_PM: 3})
+        self.assertEqual(hub.take_bumped(), {first})
+        self.assertEqual(hub.take_bumped(), set())
+        self.assertEqual(b.repeat_suffix(1), "")
+
+    def test_only_a_row_the_same_in_every_part_is_a_repeat(self):
+        hub = b.Hub()
+        now = time.time()
+        base = dict(kind=b.KIND_REG, text="RegQueryValue HKCU\\A", level=b.INFO, pid=5, proc="x.exe",
+                    detail="Path: A")
+        hub.emit(b.SRC_PM, ts=now, **base)
+        for change in (dict(kind=b.KIND_FILE), dict(text="RegQueryValue HKCU\\B"), dict(level=b.ERROR), dict(pid=6),
+                       dict(proc="y.exe"), dict(detail="Path: B")):
+            hub.emit(b.SRC_PM, ts=now, **dict(base, **change))
+        hub.emit(b.SRC_ETW, ts=now, **base)
+        self.assertEqual(len(drained(hub)), 8)
+        hub.emit(b.SRC_SYSTEM, b.KIND_SYS, "ETW: watching 4 providers", ts=now)
+        hub.emit(b.SRC_SYSTEM, b.KIND_SYS, "ETW: watching 4 providers", ts=now)
+        self.assertEqual(len(drained(hub)), 2)
+
+    def test_repeats_are_counted_again_after_a_marker_and_after_clear(self):
+        hub = b.Hub()
+        now = time.time() - 60
+        rows = []
+        for ts in (now, now + 1, now + 20, now + 21, now + 2):
+            rows.append(hub.emit(b.SRC_FILES, b.KIND_FILE, "File changed: tick.txt", b.CHANGE, ts=ts))
+            if ts == now + 1:
+                hub.mark(now + 10)
+        self.assertEqual([ev.seq for ev in rows], [rows[0].seq] * 2 + [rows[2].seq] * 2 + [rows[0].seq])
+        self.assertEqual((rows[0].count, rows[2].count, rows[2].ts), (3, 2, now + 20))
+        hub.split()
+        again = hub.emit(b.SRC_FILES, b.KIND_FILE, "File changed: tick.txt", b.CHANGE, ts=now + 22)
+        self.assertNotIn(again, rows)
+        hub.reset([b.SRC_FILES])
+        self.assertEqual((hub.repeats, hub.marks, hub.bumped), ({}, [], set()))
+
+    def test_the_trace_log_shows_a_repeat_once_at_its_first_time(self):
+        folder = tempfile.mkdtemp()
+        try:
+            for rewrite in (True, False):
+                path = os.path.join(folder, "t%d.log" % rewrite)
+                hub = b.Hub()
+                writer = b.LogWriter(path, ["Header"])
+                self.assertTrue(writer.start())
+                hub.writer = writer
+                now = time.time()
+                for step in range(12):
+                    hub.emit(b.SRC_FILES, b.KIND_FILE, "File changed: tick.txt", b.CHANGE, ts=now + step)
+                hub.emit(b.SRC_FILES, b.KIND_FILE, "File created: x.txt", b.CHANGE, ts=now + 5)
+                writer.close(["Summary"], rewrite)
+                with open(path, encoding="utf-8") as fh:
+                    lines = [line for line in fh.read().splitlines() if " Files " in line]
+                self.assertEqual(len(lines), 2, lines)
+                self.assertTrue(lines[0].startswith(b.stamp(now)), lines[0])
+                self.assertTrue(lines[0].endswith("File changed: tick.txt (12 times)"), lines[0])
+                self.assertTrue(lines[1].endswith("File created: x.txt"), lines[1])
+        finally:
+            shutil.rmtree(folder, ignore_errors=True)
+
+    def test_the_log_limit_counts_what_the_count_adds(self):
+        folder = tempfile.mkdtemp()
+        try:
+            hub = b.Hub()
+            writer = b.LogWriter(os.path.join(folder, "t.log"), ["Header"])
+            self.assertTrue(writer.start())
+            hub.writer = writer
+            now = time.time()
+            hub.emit(b.SRC_FILES, b.KIND_FILE, "File changed: tick.txt", b.CHANGE, ts=now)
+            self.assertTrue(writer.flush(5.0))
+            before = writer.written
+            for step in range(1, 100):
+                hub.emit(b.SRC_FILES, b.KIND_FILE, "File changed: tick.txt", b.CHANGE, ts=now + step)
+            self.assertTrue(writer.flush(5.0))
+            self.assertEqual(writer.written - before, len(b.repeat_suffix(100)))
+            writer.close([], True)
+        finally:
+            shutil.rmtree(folder, ignore_errors=True)
+
+    def test_the_footer_counts_every_repeat_the_log_left_out(self):
+        folder = tempfile.mkdtemp()
+        try:
+            path = os.path.join(folder, "t.log")
+            hub = b.Hub()
+            writer = b.LogWriter(path, ["Header"], b.LOG_FOOTER_ROOM + 2000)
+            self.assertTrue(writer.start())
+            hub.writer = writer
+            now = time.time()
+            for index in range(40):
+                hub.emit(b.SRC_FILES, b.KIND_FILE, "File changed: %02d %s" % (index, "x" * 80), b.CHANGE, ts=now)
+            self.assertTrue(writer.flush(5.0))
+            self.assertTrue(writer.capped)
+            late = hub.emit(b.SRC_FILES, b.KIND_FILE, "File changed: late.txt", b.CHANGE, ts=now + 1)
+            for step in range(4):
+                hub.emit(b.SRC_FILES, b.KIND_FILE, "File changed: late.txt", b.CHANGE, ts=now + 2 + step)
+            self.assertEqual(late.count, 5)
+            writer.close(["Summary"], True)
+            with open(path, encoding="utf-8") as fh:
+                text = fh.read()
+            self.assertNotIn("late.txt", text)
+            self.assertIn("%d later events left out" % (writer.dropped + 4), text)
+        finally:
+            shutil.rmtree(folder, ignore_errors=True)
+
+    def test_a_marker_summary_counts_the_repeats_inside_its_six_seconds(self):
+        ev = event(101.0, text="RegQueryValue HKCU\\A", proc="x.exe")
+        for ts in (102.0, 105.0, 107.0, 120.0):
+            ev.repeat(ts)
+        text, level, detail = b.marker_summary(1, 100.0, [ev])
+        self.assertEqual(level, b.MARK)
+        self.assertEqual(text, "Marker 1: 3 events in the 6 seconds after it (Files 3), from x.exe")
+        self.assertTrue(detail.endswith("RegQueryValue HKCU\\A (3 times)"), detail)
+        self.assertEqual(ev.seen_between(106.0, 130.0), 2)
+
+    def test_the_marker_summary_at_stop_counts_every_repeat_after_the_marker(self):
+        folder = tempfile.mkdtemp(prefix="bastard_repeat_")
+        saved = b.PROGRAM_DIR
+        try:
+            b.PROGRAM_DIR = folder
+            hub = b.Hub()
+            session = b.Session(hub, b.parse_options([]))
+            session.sources = []
+            session.writer = b.LogWriter(session.log_path, session.header())
+            self.assertTrue(session.writer.start())
+            hub.writer = session.writer
+            start = time.time() - 30
+            for index in range(5):
+                hub.emit(b.SRC_FILES, b.KIND_FILE, "File changed: tick.txt", b.CHANGE, ts=start - 1 + index * 0.1)
+            session.markers.append((1, start))
+            hub.mark(start)
+            for index in range(300):
+                hub.emit(b.SRC_FILES, b.KIND_FILE, "File changed: tick.txt", b.CHANGE, ts=start + 1 + index % 5)
+            for index in range(50):
+                hub.emit(b.SRC_FILES, b.KIND_FILE, "File changed: tick.txt", b.CHANGE, ts=start + 10)
+            session.request_stop()
+            session.finish()
+            summary = [ev.text for ev in drained(hub) if ev.text.startswith("Marker 1:")]
+            self.assertEqual(summary, ["Marker 1: 300 events in the 6 seconds after it (Files 300)"])
+            with open(session.log_path, encoding="utf-8") as fh:
+                text = fh.read()
+            self.assertIn("File changed: tick.txt (5 times)", text)
+            self.assertIn("File changed: tick.txt (350 times)", text)
+            self.assertIn("Files: 355 events", text)
+        finally:
+            b.PROGRAM_DIR = saved
+            shutil.rmtree(folder, ignore_errors=True)
+
     def test_log_writer_sorts(self):
         folder = tempfile.mkdtemp()
         try:
@@ -2013,9 +2170,18 @@ class Timeline(unittest.TestCase):
             with open(os.path.join(folder, "e.json"), encoding="utf-8") as fh:
                 data = json.load(fh)
             self.assertEqual(data["events"][0]["event"], 'quote " and comma ,')
+            self.assertEqual(data["events"][0]["count"], 1)
             self.assertEqual(data["bastard"], b.VERSION)
             with open(os.path.join(folder, "e.csv"), encoding="utf-8-sig") as fh:
                 self.assertTrue(fh.readline().startswith("Time,Source,Kind,Level,Process,PID,Event,Detail"))
+            events[0].repeat(time.time())
+            b.write_export(os.path.join(folder, "e.csv"), "csv", events)
+            b.write_export(os.path.join(folder, "e.json"), "json", events)
+            with open(os.path.join(folder, "e.csv"), encoding="utf-8-sig", newline="") as fh:
+                rows = list(csv.reader(fh))
+            self.assertEqual((rows[0][-1], rows[1][-1], rows[1][6]), ("Count", "2", 'quote " and comma ,'))
+            with open(os.path.join(folder, "e.json"), encoding="utf-8") as fh:
+                self.assertEqual(json.load(fh)["events"][0]["count"], 2)
         finally:
             shutil.rmtree(folder, ignore_errors=True)
 
@@ -2744,6 +2910,30 @@ class Window(unittest.TestCase):
         self.assertEqual((len(checked), len(app.tree.get_children())), (20, 9))
         app._rebuild()
         self.assertEqual((len(checked), len(app.tree.get_children())), (20, 9))
+
+    def test_a_repeated_row_shows_its_count_in_the_list_and_the_detail(self):
+        scale = b.setup_style(self.root)
+        app = b.App(self.root, b.parse_options([]), scale)
+        now = time.time()
+        text = "File changed: C:\\x\\tick.txt"
+        first = app.hub.emit(b.SRC_FILES, b.KIND_FILE, text, b.CHANGE, ts=now)
+        app.hub.emit(b.SRC_FILES, b.KIND_FILE, text, b.CHANGE, ts=now + 1)
+        app._drain()
+        iid = str(first.seq)
+        self.assertEqual(app.tree.get_children(), (iid,))
+        self.assertEqual(app.tree.item(iid, "values")[-1], text + " (2 times)")
+        app.tree.selection_set(iid)
+        app._selected()
+        app.hub.emit(b.SRC_FILES, b.KIND_FILE, text, b.CHANGE, ts=now + 2)
+        app._drain()
+        self.assertEqual(app.tree.item(iid, "values")[-1], text + " (3 times)")
+        self.assertIn(text + " (3 times)", app.detail.get("1.0", "end"))
+        app.clear_timeline()
+        again = app.hub.emit(b.SRC_FILES, b.KIND_FILE, text, b.CHANGE, ts=now + 3)
+        app._drain()
+        self.assertEqual(app.tree.get_children(), (str(again.seq),))
+        self.assertEqual(app.tree.item(str(again.seq), "values")[-1], text)
+        self.assertEqual(first.count, 3)
 
     def test_a_rule_from_the_menu_leaves_the_filter_switch_alone(self):
         scale = b.setup_style(self.root)
