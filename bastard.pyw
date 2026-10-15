@@ -26,7 +26,7 @@ import tkinter as tk
 import tkinter.font as tkfont
 from tkinter import filedialog, messagebox, ttk
 
-VERSION = "1.10.2"
+VERSION = "1.11.0"
 
 APP_NAME = "Bastard"
 IS_WIN = os.name == "nt"
@@ -731,6 +731,38 @@ class Event:
         return lines
 
 
+WALLPAPER_PLACES = ("transcodedwallpaper", "\\themes\\transcoded_", "\\themes\\cachedfiles", "explorer\\wallpapers")
+DESKTOP_KEY = "control panel\\desktop"
+DESKTOP_VALUES = ("wallpaper", "transcodedimagecache")
+MARKER_UNWRITTEN = ("Bastard saw no write to TranscodedWallpaper, the Themes folder, Control Panel\\Desktop or "
+                    "Explorer\\Wallpapers in these %d seconds. If Set as was pressed in Photos here, Photos stopped "
+                    "before Windows changed the wallpaper.")
+MARKER_WRITTEN = ("Something wrote the wallpaper in these %d seconds. If the picture on screen did not change, "
+                  "look in Probes at the desktop background mode and the wallpaper policies.")
+
+
+def wallpaper_write(source, level, text, detail=""):
+    if level != CHANGE:
+        return False
+    if source == SRC_WALL:
+        return True
+    low = ("%s %s" % (text, detail)).lower()
+    if any(place in low for place in WALLPAPER_PLACES):
+        return True
+    return DESKTOP_KEY in low and any(name in low for name in DESKTOP_VALUES)
+
+
+def refused(level, text, detail=""):
+    if level != ERROR:
+        return False
+    low = ("%s %s" % (text, detail)).lower()
+    return says_denied(low) or "privilege not held" in low
+
+
+def top_names(counts, limit):
+    return [name for name, _ in sorted(counts.items(), key=lambda item: (-item[1], item[0]))[:limit]]
+
+
 def marker_summary(number, start, events):
     end = start + MARKER_WINDOW
     found = []
@@ -744,19 +776,39 @@ def marker_summary(number, start, events):
         return text, WARN, ""
     by_source = {}
     by_process = {}
+    writers = {}
+    refusals = {}
+    wrote = 0
+    denied = 0
     for ev, seen in found:
         by_source[ev.source] = by_source.get(ev.source, 0) + seen
         if ev.proc:
             by_process[ev.proc] = by_process.get(ev.proc, 0) + seen
+        if wallpaper_write(ev.source, ev.level, ev.text, ev.detail):
+            wrote += seen
+            if ev.proc:
+                writers[ev.proc] = writers.get(ev.proc, 0) + seen
+        if refused(ev.level, ev.text, ev.detail):
+            denied += seen
+            if ev.proc:
+                refusals[ev.proc] = refusals.get(ev.proc, 0) + seen
+    verdict = "the wallpaper was %s in the %d seconds after it" % ("written" if wrote else "not written", MARKER_WINDOW)
+    if writers:
+        verdict += " (%s)" % ", ".join(top_names(writers, 3))
+    if denied:
+        verdict += ", and access was refused %s" % plural(denied, "time")
+        if refusals:
+            verdict += " (%s)" % ", ".join(top_names(refusals, 3))
     parts = ", ".join("%s %d" % item for item in sorted(by_source.items(), key=lambda item: (-item[1], item[0])))
     total = sum(seen for _ev, seen in found)
-    text = "Marker %d: %s in the %d seconds after it (%s)" % (number, plural(total, "event"), MARKER_WINDOW, parts)
-    names = [name for name, _ in sorted(by_process.items(), key=lambda item: (-item[1], item[0]))[:4]]
+    text = "Marker %d: %s. %s (%s)" % (number, verdict, plural(total, "event"), parts)
+    names = top_names(by_process, 4)
     if names:
         text += ", from " + ", ".join(names)
-    detail = "\n".join("%s  %-10s %s%s" % (clock(ev.ts), ev.source, one_line(ev.text, 160), repeat_suffix(seen))
-                       for ev, seen in found[:60])
-    return text, MARK, detail
+    lines = [(MARKER_WRITTEN if wrote else MARKER_UNWRITTEN) % MARKER_WINDOW, ""]
+    lines += ["%s  %-10s %s%s" % (clock(ev.ts), ev.source, one_line(ev.text, 160), repeat_suffix(seen))
+              for ev, seen in found[:60]]
+    return text, MARK, "\n".join(lines)
 
 
 class Hub:
@@ -3006,7 +3058,7 @@ class ProcMonSource(Source):
                       "Process: %s (PID %s)" % (proc, pid)]
             if self.emit(kind, one_line(text, 600), level, pid=pid, proc=proc, detail="\n".join(detail),
                          ts=ts) is not None:
-                shown.append(ts)
+                shown.append((ts, wallpaper_write(SRC_PM, level, text), level == ERROR))
         summary = "read %s, listed %d of %d: %d denied, %d registry writes, %d file writes, %d reads" % (
             plural(digest.total, "event"), len(shown), len(rows), digest.denied, digest.reg_writes,
             digest.file_writes, digest.reads)
@@ -3016,9 +3068,19 @@ class ProcMonSource(Source):
             summary += ", %d of our own left out" % digest.ours
         self.note(summary, INFO, "Capture file: %s\nRead: %s" % (self.pml, info))
         for number, start in list(self.session.markers):
-            found = sum(1 for ts in shown if start < ts <= start + MARKER_WINDOW)
-            self.hub.emit(SRC_SYSTEM, KIND_MARK, "Marker %d: ProcMon listed %s in the %d seconds after it" % (
-                number, plural(found, "event"), MARKER_WINDOW), MARK, ts=start + MARKER_WINDOW + 0.001)
+            inside = [item for item in shown if start < item[0] <= start + MARKER_WINDOW]
+            text = "Marker %d: ProcMon listed %s in the %d seconds after it" % (
+                number, plural(len(inside), "event"), MARKER_WINDOW)
+            wrote = sum(1 for item in inside if item[1])
+            denied = sum(1 for item in inside if item[2])
+            extras = []
+            if wrote:
+                extras.append("%d wrote the wallpaper" % wrote)
+            if denied:
+                extras.append("%d %s refused access" % (denied, "was" if denied == 1 else "were"))
+            if extras:
+                text += ", of which " + " and ".join(extras)
+            self.hub.emit(SRC_SYSTEM, KIND_MARK, text, MARK, ts=start + MARKER_WINDOW + 0.001)
         self.status("done", "%d listed" % len(shown))
 
 
@@ -3075,6 +3137,33 @@ def reg_key_exists(hive_const, path):
         return True
     except OSError:
         return False
+
+
+def reg_values(hive_const, path):
+    if winreg is None or hive_const is None:
+        return None
+    try:
+        handle = winreg.OpenKey(hive_const, path, 0, winreg.KEY_READ)
+    except OSError:
+        return None
+    out = []
+    with handle:
+        index = 0
+        while True:
+            try:
+                name, value, _kind = winreg.EnumValue(handle, index)
+            except OSError:
+                break
+            out.append((name, value))
+            index += 1
+    return out
+
+
+def policy_holds(value):
+    number = as_int(value)
+    if number is not None:
+        return number != 0
+    return bool(str(value).strip())
 
 
 def run_text(cmd, timeout):
@@ -3392,12 +3481,26 @@ PROBE_POLICY_KEYS = (
     ("HKLM", "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\PersonalizationCSP", "DesktopImagePath"),
     ("HKLM", "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\PersonalizationCSP", "DesktopImageUrl"),
 )
-PROBE_APPPRIVACY = ("LetAppsAccessAccountInfo", "LetAppsAccessUserData", "LetAppsAccessPicturesLibrary",
-                    "LetAppsAccessDocumentsLibrary", "LetAppsRunInBackground", "LetAppsAccessCamera",
-                    "LetAppsAccessLocation")
+PROBE_LOCKING_POLICIES = frozenset(("NoChangingWallpaper", "Wallpaper", "DesktopImagePath", "DesktopImageUrl",
+                                    "NoChangingLockScreen", "LockScreenImage", "LockScreenImagePath",
+                                    "LockScreenImageUrl"))
+PROBE_APPPRIVACY_KEY = "SOFTWARE\\Policies\\Microsoft\\Windows\\AppPrivacy"
 PROBE_APPPRIVACY_WORDS = {0: "0 (user in control)", 1: "1 (force allow)", 2: "2 (force deny)"}
+PHOTOS_FAMILY = "Microsoft.Windows.Photos_8wekyb3d8bbwe"
 PROBE_CONSENT = ("userAccountInformation", "picturesLibrary", "documentsLibrary", "broadFileSystemAccess",
                  "graphicsCaptureProgrammatic")
+CONSENT_STORE = "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\CapabilityAccessManager\\ConsentStore"
+CONSENT_PAGES = {"userAccountInformation": "Account info", "picturesLibrary": "Pictures",
+                 "documentsLibrary": "Documents", "broadFileSystemAccess": "File system"}
+WHY_STORE_ONLY = ("Why only Photos: only Store apps ask for this permission, so Settings and the old Photo Viewer "
+                  "still work.")
+WHY_POLICY_STORE = ("Why only Photos: this policy holds back Store apps alone, so Settings and the old Photo Viewer "
+                    "still work.")
+UNDO_CONSENT = "To undo: Settings > Privacy & security > %s, turn access back on%s."
+UNDO_POLICY = "To undo: delete the value %s from that key, or set its policy back to Not configured."
+LOCKING_NOTE = "This policy keeps the desktop background or the lock screen picture from being changed."
+UNDO_IFEO = "A Debugger value starts another program in place of this one. To undo: delete it from that key."
+UNDO_READ_ONLY = "To undo: clear Read-only in the file's Properties, or run attrib -R on it."
 PROBE_DISALLOW = ("photos.exe", "runtimebroker.exe", "systemsettings.exe", "backgroundtaskhost.exe",
                   "applicationframehost.exe", "winrt.runtime.dll")
 PROBE_IFEO = ("RuntimeBroker.exe", "SystemSettings.exe", "Photos.exe", "ApplicationFrameHost.exe")
@@ -3423,8 +3526,46 @@ PROBE_SHELL_VERBS = (
     ("HKCU", "Software\\Classes\\SystemFileAssociations\\.jpg\\shell\\setaswallpaper"),
 )
 PROBE_IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".bmp")
-PROBE_SERVICES = ("Themes", "AppXSvc", "ClipSVC", "StateRepository", "TokenBroker", "Dwm", "ShellHWDetection",
-                  "ShellExperienceHost")
+PROBE_SERVICES = ("Themes", "AppXSvc", "ClipSVC", "StateRepository", "TokenBroker", "camsvc", "BrokerInfrastructure",
+                  "SystemEventsBroker", "Dwm", "ShellHWDetection", "ShellExperienceHost")
+SERVICE_KEY = "SYSTEM\\CurrentControlSet\\Services\\"
+SERVICE_NAMES = {"AppXSvc": "AppX Deployment Service", "ClipSVC": "Client License Service",
+                 "StateRepository": "State Repository Service", "TokenBroker": "Web Account Manager",
+                 "camsvc": "Capability Access Manager Service",
+                 "BrokerInfrastructure": "Background Tasks Infrastructure Service",
+                 "SystemEventsBroker": "System Events Broker", "ShellHWDetection": "Shell Hardware Detection"}
+SERVICE_STARTS = {2: "starts automatically", 3: "starts when it is needed", 4: "is disabled"}
+SERVICE_DEFAULTS = {"Themes": 2, "AppXSvc": 3, "ClipSVC": 3, "StateRepository": 3, "TokenBroker": 3, "camsvc": 3,
+                    "BrokerInfrastructure": 2, "SystemEventsBroker": 2, "ShellHWDetection": 2}
+SERVICE_NOTES = {"camsvc": ("Why only Photos: Store apps such as Photos ask this service before they use a permission "
+                            "such as Pictures. The old Photo Viewer never asks it.")}
+UNDO_SERVICE = "To undo: set Start back to %d under that key, then restart Windows."
+PROBE_PACKAGES = (("Microsoft.LockApp", "the lock screen"),
+                  ("Microsoft.Windows.ShellExperienceHost", "the flyouts and panels of the taskbar"),
+                  ("Microsoft.Windows.StartMenuExperienceHost", "the Start menu"),
+                  ("MicrosoftWindows.Client.CBS", "parts of the Windows 11 taskbar and Start menu"))
+PACKAGE_NOTE = "Windows uses this package for %s. Scripts that strip the built in apps remove it."
+UNDO_PACKAGE = ("To undo, in a terminal opened as administrator: Get-AppxPackage -AllUsers %s | ForEach-Object "
+                "{ Add-AppxPackage -DisableDevelopmentMode -Register \"$($_.InstallLocation)\\AppxManifest.xml\" }")
+UNDO_PHOTOS = ("To undo: Settings > Apps > Installed apps > Microsoft Photos > Advanced options, press Repair, then "
+               "Reset if that is not enough.")
+UNDO_PHOTOS_MISSING = "To undo: install Microsoft Photos again from the Microsoft Store."
+TRUSTED_INSTALLER_SID = "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464"
+LOCAL_SYSTEM_SID = "S-1-5-18"
+WINDOWSAPPS_NOTE = ("Store apps such as Photos run from this folder, the old Photo Viewer does not. Another owner "
+                    "means takeown or a permissions tool was run on it, and Store apps can fail after that.")
+SYSTEMDATA_NOTE = ("Windows writes the lock screen pictures into this folder. Another owner means takeown or a "
+                   "permissions tool was run on it.")
+UNDO_OWNER = "To undo: repairing Windows gives the folder back. Resetting its rights by hand can break Windows further."
+BACKGROUND_TYPES = {0: "a picture", 1: "a solid color", 2: "a slideshow", 3: "Windows Spotlight"}
+BACKGROUND_NOTE = ("A slideshow or Windows Spotlight changes the picture by itself, so a picture set from Photos "
+                   "can be replaced soon after.")
+UNDO_BACKGROUND = "To undo: Settings > Personalization > Background, choose Picture."
+WINRT_PACKAGE_SCRIPT = (
+    "try { foreach ($n in @(%s)) { $p=Get-AppxPackage -Name $n | Select-Object -First 1;",
+    "if ($p) { Write-Output ('PACKAGE=' + $n + '|' + $p.Status + '|' + $p.Version) }",
+    " else { Write-Output ('PACKAGE=' + $n + '||') } } } catch { Write-Output ('ERR5:' + $_.Exception.Message) }",
+)
 WINRT_SCRIPT = (
     "$ErrorActionPreference='SilentlyContinue';",
     "try { [void][Windows.System.UserProfile.UserProfilePersonalizationSettings,Windows.System.UserProfile,"
@@ -3434,7 +3575,8 @@ WINRT_SCRIPT = (
     "try { $img=[Windows.System.UserProfile.LockScreen,Windows.System.UserProfile,ContentType=WindowsRuntime]"
     "::OriginalImageFile;",
     "Write-Output ('LockScreenOriginalImageFile=' + $img); } catch { Write-Output ('ERR2:' + $_.Exception.Message) }",
-    "try { $pkg=Get-AppxPackage Microsoft.Windows.Photos | Select-Object Name,Status,Version,PackageFullName |",
+    "try { $pkg=Get-AppxPackage Microsoft.Windows.Photos | Select-Object Name,@{n='Status';e={[string]$_.Status}},",
+    "Version,PackageFullName |",
     "ConvertTo-Json -Compress; Write-Output ('PHOTOS=' + $pkg); } catch { Write-Output ('ERR3:'"
     " + $_.Exception.Message) }",
     "try { $caps=(Get-AppxPackage Microsoft.Windows.Photos).Capabilities;",
@@ -3444,6 +3586,11 @@ WINRT_SCRIPT = (
 
 class ProbeSource(Source):
     name = SRC_PROBE
+
+    def __init__(self, session):
+        super().__init__(session)
+        self.problems = []
+        self.warnings = []
 
     def start(self):
         if not IS_WIN:
@@ -3455,7 +3602,7 @@ class ProbeSource(Source):
     def _run(self):
         probes = (self._policy, self._appprivacy, self._consentstore, self._disallowrun, self._ifeo,
                   self._shell_verbs, self._winrt, self._transcoded, self._acl, self._services,
-                  self._explorer_hints, self._shell_folders)
+                  self._explorer_hints, self._shell_folders, self._owners, self._background)
         for probe in probes:
             if self.stopping():
                 break
@@ -3463,10 +3610,34 @@ class ProbeSource(Source):
                 probe()
             except Exception as exc:
                 self.emit(KIND_PROBE, "probe %s failed: %s" % (probe.__name__, one_line(exc, 160)), WARN)
-        self.status("done", "settings read once at start")
+        if not self.stopping():
+            self._summarize()
+        self.status("done", "%s, %s" % (plural(len(self.problems), "problem"), plural(len(self.warnings), "warning")))
 
     def _say(self, text, level=INFO, detail=""):
-        self.emit(KIND_PROBE, one_line(text, 240), level, detail=detail)
+        text = one_line(text, 240)
+        if self.emit(KIND_PROBE, text, level, detail=detail) is None:
+            return
+        if level == ERROR:
+            self.problems.append(text)
+        elif level == WARN:
+            self.warnings.append(text)
+
+    def _summarize(self):
+        lines = ["Problems:"] + ["  " + text for text in self.problems or ["none"]] + ["", "Warnings:"]
+        lines += ["  " + text for text in self.warnings or ["none"]]
+        if self.problems:
+            text = "Probes found %s: %s" % (plural(len(self.problems), "problem"),
+                                            "; ".join(shorten(item, 90) for item in self.problems[:3]))
+            if len(self.problems) > 3:
+                text += "; and %d more" % (len(self.problems) - 3)
+            level = ERROR
+        else:
+            text = "Probes found no setting known to stop Photos from setting the wallpaper"
+            if self.warnings:
+                text += ", and %s to look at" % plural(len(self.warnings), "warning")
+            level = INFO
+        self.emit(KIND_PROBE, one_line(text, 600), level, detail="\n".join(lines))
 
     def _policy(self):
         self._say("A: personalization policy keys")
@@ -3474,38 +3645,74 @@ class ProbeSource(Source):
             value = reg_read_value(hive_handle(hive), path, name)
             if value is None:
                 self._say("%s %s [%s] = unset" % (hive, path, name))
+                continue
+            detail = "%s\\%s\nValue: %s = %s\n\n" % (hive, path, name, value)
+            if name in PROBE_LOCKING_POLICIES and policy_holds(value):
+                self._say("%s %s [%s] = %s" % (hive, path, name, value), ERROR,
+                          detail=detail + LOCKING_NOTE + "\n" + UNDO_POLICY % name)
             else:
-                self._say("%s %s [%s] = %s" % (hive, path, name, value), CHANGE,
-                          detail="%s\\%s\nValue: %s = %s" % (hive, path, name, value))
+                self._say("%s %s [%s] = %s" % (hive, path, name, value), CHANGE, detail=detail + UNDO_POLICY % name)
 
     def _appprivacy(self):
         self._say("B: AppPrivacy policy")
-        path = "SOFTWARE\\Policies\\Microsoft\\Windows\\AppPrivacy"
-        hive = hive_handle("HKLM")
-        if not reg_key_exists(hive, path):
-            self._say("AppPrivacy key is not there")
-            return
-        for name in PROBE_APPPRIVACY:
-            value = reg_read_value(hive, path, name)
-            if value is None:
+        found = False
+        seen = 0
+        for tag in ("HKLM", "HKCU"):
+            values = reg_values(hive_handle(tag), PROBE_APPPRIVACY_KEY)
+            if values is None:
                 continue
-            word = PROBE_APPPRIVACY_WORDS.get(as_int(value), str(value))
-            level = ERROR if as_int(value) == 2 else INFO
-            self._say("AppPrivacy [%s] = %s" % (name, word), level)
+            found = True
+            for name, value in values:
+                seen += 1
+                self._privacy_value(tag, name, value)
+        if not found:
+            self._say("AppPrivacy key is not there")
+        elif not seen:
+            self._say("AppPrivacy holds no policy")
+
+    def _privacy_value(self, tag, name, value):
+        detail = "%s\\%s\nValue: %s = %s\n\n" % (tag, PROBE_APPPRIVACY_KEY, name, one_line(value, 400))
+        if isinstance(value, int):
+            word = PROBE_APPPRIVACY_WORDS.get(value, str(value))
+            if value == 2:
+                self._say("%s AppPrivacy [%s] = %s" % (tag, name, word), WARN, detail=detail + UNDO_POLICY % name)
+            else:
+                self._say("%s AppPrivacy [%s] = %s" % (tag, name, word), INFO, detail=detail + UNDO_POLICY % name)
+            return
+        text = " ".join(str(item) for item in value) if isinstance(value, (list, tuple)) else str(value)
+        if name.lower().endswith("_forcedenytheseapps") and "microsoft.windows.photos" in text.lower():
+            self._say("%s AppPrivacy [%s] denies Microsoft Photos" % (tag, name), ERROR,
+                      detail=detail + WHY_POLICY_STORE + "\n" + UNDO_POLICY % name)
+        else:
+            self._say("%s AppPrivacy [%s] = %s" % (tag, name, one_line(text, 160)), INFO, detail=detail)
 
     def _consentstore(self):
         self._say("C: ConsentStore capability access")
-        base = "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\CapabilityAccessManager\\ConsentStore"
         for tag in ("HKLM", "HKCU"):
             hive = hive_handle(tag)
             for cap in PROBE_CONSENT:
-                value = reg_read_value(hive, base + "\\" + cap, "Value")
+                path = CONSENT_STORE + "\\" + cap
+                value = reg_read_value(hive, path, "Value")
                 if value is None:
                     self._say("%s %s = unset" % (tag, cap))
                 elif str(value) == "Deny":
-                    self._say("%s %s = Deny" % (tag, cap), ERROR)
+                    self._say("%s %s = Deny" % (tag, cap), ERROR, detail=self._consent_note(tag, path, cap, ""))
                 else:
                     self._say("%s %s = %s" % (tag, cap, value))
+                own = reg_read_value(hive, path + "\\" + PHOTOS_FAMILY, "Value")
+                if own is None:
+                    continue
+                if str(own) == "Deny":
+                    self._say("%s %s = Deny for Microsoft Photos" % (tag, cap), ERROR,
+                              detail=self._consent_note(tag, path + "\\" + PHOTOS_FAMILY, cap, " for Microsoft Photos"))
+                else:
+                    self._say("%s %s = %s for Microsoft Photos" % (tag, cap, own))
+
+    def _consent_note(self, tag, path, cap, who):
+        lines = ["Key: %s\\%s" % (tag, path), "Value: Deny", "", WHY_STORE_ONLY]
+        if cap in CONSENT_PAGES:
+            lines.append(UNDO_CONSENT % (CONSENT_PAGES[cap], who))
+        return "\n".join(lines)
 
     def _disallowrun(self):
         self._say("D: DisallowRun policy")
@@ -3541,7 +3748,8 @@ class ProbeSource(Source):
                 continue
             debugger = reg_read_value(hive, path, "Debugger")
             if debugger:
-                self._say("IFEO %s Debugger = %s" % (exe, debugger), ERROR)
+                self._say("IFEO %s Debugger = %s" % (exe, debugger), ERROR,
+                          detail="HKLM\\%s\nValue: Debugger = %s\n\n%s" % (path, debugger, UNDO_IFEO))
             options = reg_read_value(hive, path, "MitigationOptions")
             if options is not None:
                 try:
@@ -3588,8 +3796,10 @@ class ProbeSource(Source):
 
     def _winrt(self):
         self._say("G: WinRT lock screen and Photos package")
+        names = ",".join("'%s'" % name for name, _use in PROBE_PACKAGES)
+        script = "".join(WINRT_SCRIPT) + "".join(WINRT_PACKAGE_SCRIPT) % names
         code, out = run_text(["powershell", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
-                              "-WindowStyle", "Hidden", "-Command", "".join(WINRT_SCRIPT)], 40)
+                              "-WindowStyle", "Hidden", "-Command", script], 40)
         if code is None:
             self._say("WinRT read failed: %s" % out, WARN)
             return
@@ -3597,8 +3807,42 @@ class ProbeSource(Source):
             line = line.strip()
             if not line:
                 continue
+            if line.startswith("PACKAGE="):
+                self._package(line[len("PACKAGE="):])
+                continue
             level = ERROR if "IsSupported=False" in line else (WARN if line.startswith("ERR") else INFO)
             self._say(line, level)
+            if line.startswith("PHOTOS="):
+                self._photos(line[len("PHOTOS="):])
+
+    def _photos(self, text):
+        try:
+            found = json.loads(text) if text.strip() else None
+        except ValueError:
+            return
+        if isinstance(found, list):
+            found = found[0] if found else None
+        if not isinstance(found, dict):
+            self._say("Microsoft Photos is not installed for this user", ERROR, detail=UNDO_PHOTOS_MISSING)
+            return
+        status = str(found.get("Status") or "").strip()
+        if status and status not in ("Ok", "0"):
+            self._say("Microsoft Photos is installed but its package status is %s" % status, ERROR,
+                      detail="Package: %s\n\n%s" % (found.get("PackageFullName") or PHOTOS_FAMILY, UNDO_PHOTOS))
+
+    def _package(self, text):
+        name, _sep, rest = text.partition("|")
+        status, _sep, version = rest.partition("|")
+        use = dict(PROBE_PACKAGES).get(name, "")
+        note = PACKAGE_NOTE % use if use else ""
+        if not status:
+            level = INFO if name == "MicrosoftWindows.Client.CBS" else WARN
+            self._say("%s is not installed" % name, level, detail="%s\n%s" % (note, UNDO_PACKAGE % name))
+        elif status != "Ok":
+            self._say("%s is installed but its package status is %s" % (name, status), ERROR,
+                      detail="%s\n%s" % (note, UNDO_PACKAGE % name))
+        else:
+            self._say("%s is installed, version %s" % (name, version or "unknown"))
 
     def _rights(self, label, path):
         code, out = run_text(["icacls", path], 20)
@@ -3627,7 +3871,7 @@ class ProbeSource(Source):
         self._say("TranscodedWallpaper holds %s and was last written %s" % (plural(size, "byte"), written),
                   INFO, detail=path)
         if marked:
-            self._say("TranscodedWallpaper is marked read only", ERROR, detail=path)
+            self._say("TranscodedWallpaper is marked read only", ERROR, detail="%s\n\n%s" % (path, UNDO_READ_ONLY))
         self._rights("TranscodedWallpaper", path)
 
     def _acl(self):
@@ -3665,14 +3909,28 @@ class ProbeSource(Source):
             state = ""
             for line in out.splitlines():
                 if "STATE" in line:
-                    state = line.strip()
+                    state = line.split()[-1].lower() if line.split() else ""
                     break
-            if "RUNNING" in state:
-                self._say("%s %s" % (svc, state))
-            elif "STOPPED" in state:
-                self._say("%s %s" % (svc, state), WARN)
-            else:
-                self._say("%s %s" % (svc, state or "state unknown"), WARN)
+            start = as_int(reg_read_value(hive_handle("HKLM"), SERVICE_KEY + svc, "Start"))
+            self._service_row(svc, state, start)
+
+    def _service_row(self, svc, state, start):
+        how = SERVICE_STARTS.get(start, "")
+        label = "%s (%s)" % (svc, SERVICE_NAMES[svc]) if svc in SERVICE_NAMES else svc
+        if start == 4:
+            lines = ["Key: HKLM\\%s%s" % (SERVICE_KEY, svc), "Value: Start = 4", ""]
+            if svc in SERVICE_NOTES:
+                lines.append(SERVICE_NOTES[svc])
+            lines.append(UNDO_SERVICE % SERVICE_DEFAULTS.get(svc, 3))
+            self._say("%s is disabled" % label, ERROR, detail="\n".join(lines))
+        elif state == "running":
+            self._say("%s is running%s" % (label, " and " + how if how else ""))
+        elif state == "stopped" and start == 3:
+            self._say("%s is stopped and %s" % (label, how))
+        elif state == "stopped" and start == 2:
+            self._say("%s is stopped although it %s" % (label, how), WARN)
+        else:
+            self._say("%s is %s" % (label, state or "in a state sc did not report"), WARN)
 
     def _explorer_hints(self):
         self._say("K: Explorer policy hints")
@@ -3711,6 +3969,49 @@ class ProbeSource(Source):
                     self._say("%s [%s] = %s" % (tag, name, full), INFO, detail=detail)
         if not seen:
             self._say("no shell folder values could be read", WARN)
+
+    def _owners(self):
+        self._say("M: folder owners")
+        if win32security is None:
+            self._say("the folder owners could not be read: pywin32 is missing", WARN)
+            return
+        program_files = os.environ.get("ProgramFiles") or "C:\\Program Files"
+        program_data = os.environ.get("ProgramData") or "C:\\ProgramData"
+        folders = (("WindowsApps", os.path.join(program_files, "WindowsApps"), TRUSTED_INSTALLER_SID,
+                    "TrustedInstaller", WINDOWSAPPS_NOTE),
+                   ("SystemData", os.path.join(program_data, "Microsoft", "Windows", "SystemData"), LOCAL_SYSTEM_SID,
+                    "SYSTEM", SYSTEMDATA_NOTE))
+        for label, path, wanted, owner, note in folders:
+            if not os.path.isdir(path):
+                self._say("%s is not there: %s" % (label, path), WARN)
+                continue
+            try:
+                holder = win32security.GetNamedSecurityInfo(path, win32security.SE_FILE_OBJECT,
+                                                            win32security.OWNER_SECURITY_INFORMATION)
+                sid = holder.GetSecurityDescriptorOwner()
+                text = win32security.ConvertSidToStringSid(sid)
+            except Exception as exc:
+                self._say("the owner of %s could not be read: %s" % (label, one_line(exc, 160)), INFO, detail=path)
+                continue
+            if text == wanted:
+                self._say("%s belongs to %s" % (label, sid_name(sid)), INFO, detail=path)
+            else:
+                self._say("%s belongs to %s instead of %s" % (label, sid_name(sid), owner), ERROR,
+                          detail="%s\nOwner: %s\n\n%s\n%s" % (path, text, note, UNDO_OWNER))
+
+    def _background(self):
+        self._say("N: desktop background")
+        path = "Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Wallpapers"
+        value = as_int(reg_read_value(hive_handle("HKCU"), path, "BackgroundType"))
+        if value is None:
+            self._say("BackgroundType is not set")
+            return
+        text = "the desktop background is %s (BackgroundType %d)" % (BACKGROUND_TYPES.get(value, "unknown"), value)
+        detail = "HKCU\\%s\nValue: BackgroundType = %d" % (path, value)
+        if value in (2, 3):
+            self._say(text, CHANGE, detail="%s\n\n%s\n%s" % (detail, BACKGROUND_NOTE, UNDO_BACKGROUND))
+        else:
+            self._say(text, INFO, detail=detail)
 
 
 TRACE_PROVIDER_LINE = "{%s} 0xffffffffffffffff 5"
@@ -4053,8 +4354,9 @@ SORT_KEYS = {
     "pid": lambda ev: (ev.pid or 0, ev.ts, ev.seq),
     "event": lambda ev: ((ev.text or "").lower(), ev.ts, ev.seq),
 }
-DETAIL_HINT = ("Start (F5) begins a trace. Do what you want to watch, press Marker (F8) at the moment you try it, "
-               "then Stop (Shift+F5).\n\nSelect an event to see its details here.")
+DETAIL_HINT = ("1. Start (F5) begins a trace.\n2. Press Marker (F8) the moment you try what you want to watch.\n"
+               "3. Stop (Shift+F5) ends it.\n\nSelect an event to see its details here, and what to do about a "
+               "problem Probes found.")
 
 
 def style_set(style, name, **options):
@@ -4367,6 +4669,12 @@ class App:
         self.btn_clear.pack(side="right", padx=self.px(2))
         self.btn_filter = ttk.Button(bar, text="Filter", command=self.edit_filter)
         self.btn_filter.pack(side="right", padx=self.px(2))
+        self.btn_export = ttk.Button(bar, text="Export", command=self.export_menu)
+        self.btn_export.pack(side="right", padx=self.px(2))
+        self.export_popup = tk.Menu(bar, tearoff=0, bg=Theme.PANEL, fg=Theme.FG, activebackground=Theme.ACCENT,
+                                    activeforeground=Theme.PANEL, bd=0)
+        self.export_popup.add_command(label="Save as CSV", accelerator="Ctrl+S", command=lambda: self.export("csv"))
+        self.export_popup.add_command(label="Save as JSON", accelerator="Ctrl+J", command=lambda: self.export("json"))
         admin_text = "administrator" if self.admin else ("not administrator" if IS_WIN else "")
         tk.Label(bar, text=admin_text, bg=Theme.PANEL, fg=Theme.GREEN if self.admin else Theme.ORANGE,
                  font=self.fonts["small"]).pack(side="right", padx=self.px(12))
@@ -4951,6 +5259,13 @@ class App:
             self.flash("Saved %s to %s" % (plural(len(events), "event"), path))
         except Exception as exc:
             messagebox.showerror("Bastard", "The file could not be saved:\n%s" % exc, parent=self.root)
+
+    def export_menu(self):
+        button = self.btn_export
+        try:
+            self.export_popup.tk_popup(button.winfo_rootx(), button.winfo_rooty() + button.winfo_height())
+        finally:
+            self.export_popup.grab_release()
 
     def _popup(self, event):
         row = self.tree.identify_row(event.y)

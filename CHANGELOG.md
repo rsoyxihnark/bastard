@@ -1,5 +1,32 @@
 # Changelog
 
+## 1.11.0
+
+- Bastard 1.11.0 says after each Marker whether the wallpaper was written, ends Probes with a verdict and checks many more settings.
+- The summary after each Marker now starts by saying whether the wallpaper was written in the 6 seconds after it.
+- The summary after each Marker now also says how often access was refused in its 6 seconds, and to which programs.
+- Selecting the summary after a Marker now explains in Details what it means that the wallpaper was or was not written.
+- After Stop, the ProcMon line of each Marker also counts the wallpaper writes and the refusals in its 6 seconds.
+- Probes now ends with one line that names the problems it found, or says it found no setting known to stop Photos.
+- The Probes line in the sources panel now counts the problems and warnings Probes found.
+- A Probes problem now says in Details how to undo it, and why only Photos is affected where that is known.
+- Probes now marks a policy that locks the desktop background or the lock screen picture as a Problem.
+- Probes now reads every AppPrivacy policy, under the machine and the user, instead of a fixed list.
+- Probes now marks an AppPrivacy deny list that names Microsoft Photos as a Problem.
+- Probes now shows an AppPrivacy policy that denies every app as a Warning, not a Problem.
+- Probes now also reads the app permissions set for Microsoft Photos alone, such as Pictures.
+- Probes now says whether each service is running and how it starts, and marks a disabled one as a Problem.
+- Fixed Probes warning about services that stay stopped until they are needed, such as AppXSvc and ClipSVC.
+- Probes now also checks the Capability Access Manager, Background Tasks Infrastructure and System Events Broker services.
+- Probes now shows the full name of a service next to its short one, such as AppXSvc (AppX Deployment Service).
+- Probes now checks the lock screen, Start menu and taskbar packages that scripts stripping Windows apps remove.
+- Probes now marks Microsoft Photos as a Problem when it is not installed or its package is not in order.
+- Probes now shows the status of the Photos package as a word, such as Ok.
+- Probes now checks that WindowsApps belongs to TrustedInstaller and SystemData belongs to SYSTEM.
+- Probes now says when the desktop background is a slideshow or Windows Spotlight, which can replace a picture set from Photos.
+- An Export button next to Filter now saves the event list as CSV or JSON, like Ctrl+S and Ctrl+J.
+- Details now opens with the three steps of a trace, numbered.
+
 ## 1.10.2
 
 - Bastard 1.10.2 no longer takes more and more memory in a long trace, keeps Clear from bringing back older rows, and tidies the ETW rows.

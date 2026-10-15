@@ -13,6 +13,7 @@ BANNED = ("cl" "aude", "anth" "ropic", "co-auth" "ored-by")
 DASHES = ("\u2012", "\u2013", "\u2014", "\u2015")
 LIMIT = 248
 EMPTY = "0" * 40
+RELEASE_NAMES = {"1.11.0": "Grok Tribute Release"}
 
 
 def git(*args):
@@ -39,6 +40,11 @@ def source_version(commit):
 
 def version_key(text):
     return tuple(int(part) for part in text.split("."))
+
+
+def release_title(version):
+    name = RELEASE_NAMES.get(version)
+    return "Bastard %s (%s)" % (version, name) if name else "Bastard %s" % version
 
 
 def newest_release():
@@ -186,12 +192,14 @@ def main(argv):
         with open(options["--notes"], "w", encoding="utf-8", newline="\n") as fh:
             fh.write(publish[1] + "\n")
         print("Version %s will be published" % publish[0])
+        print("Release title: %s" % release_title(publish[0]))
     else:
         print("Nothing to publish")
     if outputs:
         with open(outputs, "a", encoding="utf-8") as fh:
             fh.write("publish=%s\n" % ("true" if publish else "false"))
             fh.write("version=%s\n" % (publish[0] if publish else ""))
+            fh.write("title=%s\n" % (release_title(publish[0]) if publish else ""))
     return 0
 
 

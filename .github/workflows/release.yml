@@ -89,4 +89,4 @@ jobs:
         if: steps.gate.outputs.publish == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "v${{ steps.gate.outputs.version }}" dist/Bastard.exe --title "Bastard ${{ steps.gate.outputs.version }}" --notes-file release_notes.md --target "${{ github.sha }}"
+        run: gh release create "v${{ steps.gate.outputs.version }}" dist/Bastard.exe --title "${{ steps.gate.outputs.title }}" --notes-file release_notes.md --target "${{ github.sha }}"

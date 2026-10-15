@@ -796,6 +796,267 @@ class NewSources(unittest.TestCase):
         levels = {ev.text.split("[")[1].split("]")[0]: ev.level for ev in drained(hub) if "[" in ev.text}
         self.assertEqual(levels, {"Desktop": b.WARN, "AppData": b.INFO, "Local AppData": b.INFO, "My Pictures": b.WARN})
 
+    def test_appprivacy_reads_every_policy_and_names_a_photos_deny(self):
+        listed = {"HKLM": [("LetAppsAccessCamera", 2), ("LetAppsRunInBackground", 0),
+                           ("LetAppsAccessAccountInfo_ForceDenyTheseApps", ["Microsoft.Windows.Photos_8wekyb3d8bbwe"]),
+                           ("LetAppsAccessCamera_ForceDenyTheseApps", ["Contoso.App_123"])]}
+        hub = b.Hub()
+        saved = (b.reg_values, b.hive_handle)
+        try:
+            b.hive_handle = lambda name: name
+            b.reg_values = lambda hive, _path: listed.get(hive)
+            b.ProbeSource(FakeSession(hub))._appprivacy()
+            rows = {ev.text: ev for ev in drained(hub)}
+            listed = {}
+            hub = b.Hub()
+            b.ProbeSource(FakeSession(hub))._appprivacy()
+            missing = [ev.text for ev in drained(hub)]
+        finally:
+            b.reg_values, b.hive_handle = saved
+        self.assertEqual(rows["HKLM AppPrivacy [LetAppsAccessCamera] = 2 (force deny)"].level, b.WARN)
+        self.assertEqual(rows["HKLM AppPrivacy [LetAppsRunInBackground] = 0 (user in control)"].level, b.INFO)
+        deny = rows["HKLM AppPrivacy [LetAppsAccessAccountInfo_ForceDenyTheseApps] denies Microsoft Photos"]
+        self.assertEqual(deny.level, b.ERROR)
+        self.assertIn("Why only Photos: this policy holds back Store apps alone", deny.detail)
+        self.assertIn("To undo: delete the value LetAppsAccessAccountInfo_ForceDenyTheseApps from that key", deny.detail)
+        self.assertEqual(rows["HKLM AppPrivacy [LetAppsAccessCamera_ForceDenyTheseApps] = Contoso.App_123"].level, b.INFO)
+        self.assertEqual(missing, ["B: AppPrivacy policy", "AppPrivacy key is not there"])
+
+    def test_the_consent_store_is_read_for_photos_too(self):
+        values = {("HKCU", b.CONSENT_STORE + "\\picturesLibrary"): "Allow",
+                  ("HKCU", b.CONSENT_STORE + "\\picturesLibrary\\" + b.PHOTOS_FAMILY): "Deny",
+                  ("HKLM", b.CONSENT_STORE + "\\documentsLibrary"): "Deny"}
+        hub = b.Hub()
+        saved = (b.reg_read_value, b.hive_handle)
+        try:
+            b.hive_handle = lambda name: name
+            b.reg_read_value = lambda hive, path, name: values.get((hive, path)) if name == "Value" else None
+            b.ProbeSource(FakeSession(hub))._consentstore()
+        finally:
+            b.reg_read_value, b.hive_handle = saved
+        rows = {ev.text: ev for ev in drained(hub)}
+        own = rows["HKCU picturesLibrary = Deny for Microsoft Photos"]
+        self.assertEqual(own.level, b.ERROR)
+        self.assertIn("Why only Photos: only Store apps ask for this permission", own.detail)
+        self.assertIn("To undo: Settings > Privacy & security > Pictures, turn access back on for Microsoft Photos.",
+                      own.detail)
+        self.assertEqual(rows["HKCU picturesLibrary = Allow"].level, b.INFO)
+        whole = rows["HKLM documentsLibrary = Deny"]
+        self.assertEqual(whole.level, b.ERROR)
+        self.assertIn("To undo: Settings > Privacy & security > Documents, turn access back on.", whole.detail)
+        self.assertEqual(rows["HKLM graphicsCaptureProgrammatic = unset"].level, b.INFO)
+
+    def test_a_disabled_service_is_a_problem_and_a_stopped_manual_one_is_not(self):
+        replies = {"Themes": (0, "        STATE              : 4  RUNNING"),
+                   "Dwm": (1060, "[SC] OpenService FAILED 1060:")}
+        starts = {"Themes": 2, "AppXSvc": 3, "camsvc": 4, "ShellHWDetection": 2}
+        hub = b.Hub()
+        saved = (b.run_text, b.reg_read_value, b.hive_handle)
+        try:
+            b.hive_handle = lambda name: name
+            b.run_text = lambda cmd, _timeout: replies.get(cmd[-1], (0, "        STATE              : 1  STOPPED"))
+            b.reg_read_value = lambda _hive, path, name: starts.get(path.rsplit("\\", 1)[-1]) if name == "Start" else None
+            b.ProbeSource(FakeSession(hub))._services()
+        finally:
+            b.run_text, b.reg_read_value, b.hive_handle = saved
+        rows = {ev.text.split(" ")[0]: ev for ev in drained(hub) if ev.text != "J: services"}
+        self.assertEqual((rows["Themes"].text, rows["Themes"].level), ("Themes is running and starts automatically", b.INFO))
+        self.assertEqual((rows["AppXSvc"].text, rows["AppXSvc"].level),
+                         ("AppXSvc (AppX Deployment Service) is stopped and starts when it is needed", b.INFO))
+        self.assertEqual((rows["camsvc"].text, rows["camsvc"].level),
+                         ("camsvc (Capability Access Manager Service) is disabled", b.ERROR))
+        self.assertIn("Why only Photos: Store apps such as Photos ask this service", rows["camsvc"].detail)
+        self.assertIn("To undo: set Start back to 3 under that key", rows["camsvc"].detail)
+        self.assertEqual(rows["ShellHWDetection"].level, b.WARN)
+        self.assertEqual(rows["ClipSVC"].level, b.WARN)
+        self.assertEqual(rows["Dwm"].level, b.INFO)
+        self.assertEqual(set(rows), set(b.PROBE_SERVICES))
+
+    def test_winrt_lists_the_shell_packages_and_judges_photos(self):
+        out = "\n".join([
+            "IsSupported=True",
+            'PHOTOS={"Name":"Microsoft.Windows.Photos","Status":"Tampered","Version":"2024.1","PackageFullName":"P_1"}',
+            "PACKAGE=Microsoft.LockApp||",
+            "PACKAGE=Microsoft.Windows.ShellExperienceHost|Ok|10.0.1",
+            "PACKAGE=Microsoft.Windows.StartMenuExperienceHost|NeedsRemediation|10.0.2",
+            "PACKAGE=MicrosoftWindows.Client.CBS||",
+        ])
+        hub = b.Hub()
+        scripts = []
+        saved = b.run_text
+
+        def fake(cmd, _timeout):
+            scripts.append(cmd[-1])
+            return 0, out
+        try:
+            b.run_text = fake
+            b.ProbeSource(FakeSession(hub))._winrt()
+        finally:
+            b.run_text = saved
+        self.assertIn("@('Microsoft.LockApp','Microsoft.Windows.ShellExperienceHost',", scripts[0])
+        self.assertIn("Select-Object Name,@{n='Status';e={[string]$_.Status}},Version,PackageFullName |", scripts[0])
+        rows = {ev.text: ev for ev in drained(hub)}
+        lock = rows["Microsoft.LockApp is not installed"]
+        self.assertEqual(lock.level, b.WARN)
+        self.assertIn("Windows uses this package for the lock screen.", lock.detail)
+        self.assertIn("Get-AppxPackage -AllUsers Microsoft.LockApp", lock.detail)
+        self.assertEqual(rows["Microsoft.Windows.ShellExperienceHost is installed, version 10.0.1"].level, b.INFO)
+        self.assertEqual(rows["Microsoft.Windows.StartMenuExperienceHost is installed but its package status is "
+                              "NeedsRemediation"].level, b.ERROR)
+        self.assertEqual(rows["MicrosoftWindows.Client.CBS is not installed"].level, b.INFO)
+        photos = rows["Microsoft Photos is installed but its package status is Tampered"]
+        self.assertEqual(photos.level, b.ERROR)
+        self.assertIn("press Repair", photos.detail)
+        self.assertFalse(any(text.startswith("PACKAGE=") for text in rows))
+
+    def test_the_photos_package_line_is_judged(self):
+        for text, wanted in (("", "Microsoft Photos is not installed for this user"),
+                             ('{"Name":"Microsoft.Windows.Photos","Status":"Ok"}', None),
+                             ('{"Name":"Microsoft.Windows.Photos","Status":0}', None),
+                             ('[{"Status":"Modified","PackageFullName":"P_2"}]',
+                              "Microsoft Photos is installed but its package status is Modified"),
+                             ("not json", None)):
+            hub = b.Hub()
+            b.ProbeSource(FakeSession(hub))._photos(text)
+            self.assertEqual([ev.text for ev in drained(hub)], [wanted] if wanted else [], text)
+
+    def test_a_policy_that_locks_the_background_is_a_problem(self):
+        keys = (("HKCU", "Software\\Microsoft\\Windows\\CurrentVersion\\Policies\\ActiveDesktop", "NoChangingWallpaper"),
+                ("HKLM", "SOFTWARE\\Policies\\Microsoft\\Windows\\CloudContent", "DisableWindowsSpotlightFeatures"),
+                ("HKCU", "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Policies\\System", "Wallpaper"),
+                ("HKLM", "SOFTWARE\\Policies\\Microsoft\\Windows\\Personalization", "NoLockScreen"))
+        values = {"NoChangingWallpaper": 1, "DisableWindowsSpotlightFeatures": 1, "Wallpaper": ""}
+        hub = b.Hub()
+        saved = (b.reg_read_value, b.PROBE_POLICY_KEYS)
+        try:
+            b.PROBE_POLICY_KEYS = keys
+            b.reg_read_value = lambda _hive, _path, name: values.get(name)
+            b.ProbeSource(FakeSession(hub))._policy()
+        finally:
+            b.reg_read_value, b.PROBE_POLICY_KEYS = saved
+        rows = {ev.text.split("[")[1].split("]")[0]: ev for ev in drained(hub) if "[" in ev.text}
+        self.assertEqual(rows["NoChangingWallpaper"].level, b.ERROR)
+        self.assertIn(b.LOCKING_NOTE, rows["NoChangingWallpaper"].detail)
+        self.assertIn("To undo: delete the value NoChangingWallpaper from that key", rows["NoChangingWallpaper"].detail)
+        self.assertEqual(rows["DisableWindowsSpotlightFeatures"].level, b.CHANGE)
+        self.assertEqual(rows["Wallpaper"].level, b.CHANGE)
+        self.assertEqual(rows["NoLockScreen"].level, b.INFO)
+
+    def test_probes_end_with_a_verdict(self):
+        hub = b.Hub()
+        probe = b.ProbeSource(FakeSession(hub))
+        probe._say("camsvc is disabled", b.ERROR)
+        probe._say("ShellHWDetection is stopped although it starts automatically", b.WARN)
+        probe._summarize()
+        last = drained(hub)[-1]
+        self.assertEqual((last.text, last.level), ("Probes found 1 problem: camsvc is disabled", b.ERROR))
+        self.assertIn("Warnings:\n  ShellHWDetection is stopped although it starts automatically", last.detail)
+        hub = b.Hub()
+        probe = b.ProbeSource(FakeSession(hub))
+        for index in range(5):
+            probe._say("problem %d" % index, b.ERROR)
+        probe._summarize()
+        self.assertEqual(drained(hub)[-1].text, "Probes found 5 problems: problem 0; problem 1; problem 2; and 2 more")
+        hub = b.Hub()
+        probe = b.ProbeSource(FakeSession(hub))
+        probe._say("Themes is running and starts automatically")
+        probe._say("AppXSvc is stopped", b.WARN)
+        probe._summarize()
+        last = drained(hub)[-1]
+        self.assertEqual((last.text, last.level), ("Probes found no setting known to stop Photos from setting the "
+                                                   "wallpaper, and 1 warning to look at", b.INFO))
+        self.assertIn("Problems:\n  none", last.detail)
+
+    def test_a_probe_row_the_filter_leaves_out_stays_out_of_the_verdict(self):
+        hub = b.Hub(b.Exclusions(b.DEFAULT_EXCLUSIONS))
+        probe = b.ProbeSource(FakeSession(hub))
+        probe._say("DisallowRun [1] = photos.exe", b.ERROR)
+        probe._summarize()
+        rows = drained(hub)
+        self.assertEqual([ev.text for ev in rows],
+                         ["Probes found no setting known to stop Photos from setting the wallpaper"])
+        self.assertEqual(probe.problems, [])
+
+    def test_the_probes_panel_line_counts_problems_and_warnings(self):
+        hub = b.Hub()
+        saved = (b.run_text, b.win32security)
+        try:
+            b.run_text = lambda _cmd, _timeout: (None, "not here")
+            b.win32security = None
+            b.ProbeSource(FakeSession(hub))._run()
+        finally:
+            b.run_text, b.win32security = saved
+        rows = drained(hub)
+        state, note = hub.snapshot()[0][b.SRC_PROBE]
+        self.assertEqual(state, "done")
+        problems = sum(1 for ev in rows[:-1] if ev.level == b.ERROR)
+        warnings = sum(1 for ev in rows[:-1] if ev.level == b.WARN)
+        self.assertEqual(note, "%s, %s" % (b.plural(problems, "problem"), b.plural(warnings, "warning")))
+        self.assertTrue(rows[-1].text.startswith("Probes found"), rows[-1].text)
+        self.assertIn("N: desktop background", [ev.text for ev in rows])
+        self.assertIn("M: folder owners", [ev.text for ev in rows])
+
+    def test_a_slideshow_background_is_pointed_out(self):
+        for value, level, text in ((2, b.CHANGE, "the desktop background is a slideshow (BackgroundType 2)"),
+                                   (3, b.CHANGE, "the desktop background is Windows Spotlight (BackgroundType 3)"),
+                                   (0, b.INFO, "the desktop background is a picture (BackgroundType 0)"),
+                                   (None, b.INFO, "BackgroundType is not set")):
+            hub = b.Hub()
+            saved = b.reg_read_value
+            try:
+                b.reg_read_value = lambda _hive, _path, _name, found=value: found
+                b.ProbeSource(FakeSession(hub))._background()
+            finally:
+                b.reg_read_value = saved
+            rows = [ev for ev in drained(hub) if ev.text != "N: desktop background"]
+            self.assertEqual([(ev.text, ev.level) for ev in rows], [(text, level)])
+            if value == 2:
+                self.assertIn("Settings > Personalization > Background, choose Picture", rows[0].detail)
+
+    def test_a_folder_owned_by_someone_else_is_a_problem(self):
+        root = tempfile.mkdtemp()
+        apps = os.path.join(root, "pf", "WindowsApps")
+        data = os.path.join(root, "pd", "Microsoft", "Windows", "SystemData")
+        os.makedirs(apps)
+        os.makedirs(data)
+        owners = {apps: "S-1-5-32-544", data: b.LOCAL_SYSTEM_SID}
+        names = {"S-1-5-32-544": ("Administrators", "BUILTIN", 4), b.LOCAL_SYSTEM_SID: ("SYSTEM", "NT AUTHORITY", 5)}
+
+        class Holder:
+            def __init__(self, sid):
+                self.sid = sid
+
+            def GetSecurityDescriptorOwner(self):
+                return self.sid
+
+        class Security:
+            SE_FILE_OBJECT = 1
+            OWNER_SECURITY_INFORMATION = 1
+            GetNamedSecurityInfo = staticmethod(lambda path, _kind, _flags: Holder(owners[path]))
+            ConvertSidToStringSid = staticmethod(lambda sid: sid)
+            LookupAccountSid = staticmethod(lambda _system, sid: names[sid])
+
+        hub = b.Hub()
+        saved = (b.win32security, os.environ.get("ProgramFiles"), os.environ.get("ProgramData"))
+        try:
+            b.win32security = Security
+            os.environ["ProgramFiles"] = os.path.join(root, "pf")
+            os.environ["ProgramData"] = os.path.join(root, "pd")
+            b.ProbeSource(FakeSession(hub))._owners()
+        finally:
+            b.win32security = saved[0]
+            for key, value in (("ProgramFiles", saved[1]), ("ProgramData", saved[2])):
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
+            shutil.rmtree(root, ignore_errors=True)
+        rows = {ev.text: ev for ev in drained(hub)}
+        wrong = rows["WindowsApps belongs to BUILTIN\\Administrators instead of TrustedInstaller"]
+        self.assertEqual(wrong.level, b.ERROR)
+        self.assertIn("takeown", wrong.detail)
+        self.assertEqual(rows["SystemData belongs to NT AUTHORITY\\SYSTEM"].level, b.INFO)
+
 
 class Timeline(unittest.TestCase):
     def test_store_order_and_window(self):
@@ -865,7 +1126,7 @@ class Timeline(unittest.TestCase):
         rules = b.Exclusions(b.DEFAULT_EXCLUSIONS)
         wanted = [
             (b.SRC_SYSTEM, b.INFO, "Trace stopped after 32.0 s"),
-            (b.SRC_SYSTEM, b.MARK, "Marker 1: 4 events in the 6 seconds after it"),
+            (b.SRC_SYSTEM, b.MARK, "Marker 1: the wallpaper was not written in the 6 seconds after it. 4 events (Files 4)"),
             (b.SRC_FILES, b.CHANGE, "File created: %s\\x.txt" % SELFTEST_WORK),
             (b.SRC_FILES, b.CHANGE, "File renamed: %s\\x.txt -> %s\\y.txt" % (SELFTEST_WORK, SELFTEST_WORK)),
             (b.SRC_FILES, b.CHANGE, "File deleted: %s\\y.txt" % SELFTEST_WORK),
@@ -1484,7 +1745,8 @@ class Timeline(unittest.TestCase):
     def test_a_default_rule_never_silences_our_own_notices(self):
         rules = b.Exclusions(b.DEFAULT_EXCLUSIONS)
         for text in ("Bastard 1.6.1 started", "Trace started", "Trace stopped after 32.0 s",
-                     "ProcMon: read 1000 events", "Marker 1: 4 events in the 6 seconds after it"):
+                     "ProcMon: read 1000 events",
+                     "Marker 1: the wallpaper was not written in the 6 seconds after it. 4 events (Files 4)"):
             self.assertFalse(rules.blocks(b.SRC_SYSTEM, b.INFO, text), text)
         self.assertEqual(rules.blocked, 0)
 
@@ -1733,7 +1995,7 @@ class Timeline(unittest.TestCase):
                                for index in range(60))
             for number in range(1, 21):
                 summary = event(now + 20 + number, b.SRC_SYSTEM, b.KIND_MARK, b.MARK,
-                                "Marker %d: 60 events in the 6 seconds after it (Files 60)" % number)
+                                "Marker %d: the wallpaper was not written in the 6 seconds after it. 60 events (Files 60)" % number)
                 summary.detail = detail
                 writer.put(summary)
             writer.put(event(now + 50, b.SRC_SYSTEM, b.KIND_SYS, b.INFO, "Trace stopped after 32 seconds"))
@@ -1850,7 +2112,9 @@ class Timeline(unittest.TestCase):
         self.assertNotIn("Get-Acl", text)
         self.assertNotIn("REGISTRY_ACL_SCRIPT", text)
         self.assertIn("DACL_SECURITY_INFORMATION", text)
-        self.assertEqual(text.count("GetNamedSecurityInfo"), 1)
+        self.assertIn("OWNER_SECURITY_INFORMATION", text)
+        self.assertNotIn("SACL_SECURITY_INFORMATION", text)
+        self.assertEqual(text.count("GetNamedSecurityInfo"), 2)
         self.assertEqual(b.REGISTRY_ACL_OBJECT, "CURRENT_USER\\Control Panel\\Desktop")
         self.assertEqual(text.lower().count("powershell"), 1)
 
@@ -1982,8 +2246,70 @@ class Timeline(unittest.TestCase):
                   event(103.0, "System", "System"), event(105.9, proc="x.exe")]
         text, level, detail = b.marker_summary(1, 100.0, events)
         self.assertEqual(level, b.MARK)
-        self.assertEqual(text, "Marker 1: 3 events in the 6 seconds after it (Files 2, Registry 1), from Photos.exe, x.exe")
-        self.assertEqual(len(detail.splitlines()), 3)
+        self.assertEqual(text, "Marker 1: the wallpaper was not written in the 6 seconds after it. 3 events (Files 2, Registry 1), "
+                               "from Photos.exe, x.exe")
+        self.assertEqual(len(detail.splitlines()), 5)
+        self.assertTrue(detail.startswith("Bastard saw no write to TranscodedWallpaper"), detail)
+
+    def test_a_marker_summary_says_when_the_wallpaper_was_written(self):
+        events = [event(101.0, text="File changed: C:\\Users\\me\\AppData\\Roaming\\Microsoft\\Windows\\Themes\\TranscodedWallpaper"),
+                  event(101.5, "Registry", "Registry", text="HKCU\\Control Panel\\Desktop [WallPaper]: a.jpg -> b.jpg"),
+                  event(102.0, "ProcMon", "Registry", text="RegSetValue HKCU\\Control Panel\\Desktop\\WallPaper",
+                        proc="explorer.exe"),
+                  event(102.5, "Wallpaper", "Desktop", text="Wallpaper changed: a.jpg -> b.jpg"),
+                  event(103.0, "Registry", "Registry", text="HKCU\\Control Panel\\Desktop [CursorBlinkRate]: 530 -> 500")]
+        text, level, detail = b.marker_summary(1, 100.0, events)
+        self.assertEqual(level, b.MARK)
+        self.assertEqual(text, "Marker 1: the wallpaper was written in the 6 seconds after it (explorer.exe). "
+                               "5 events (Registry 2, Files 1, ProcMon 1, Wallpaper 1), from explorer.exe")
+        self.assertTrue(detail.startswith("Something wrote the wallpaper in these 6 seconds."), detail)
+
+    def test_a_marker_summary_counts_refused_access(self):
+        events = [event(101.0, "ProcMon", "File", b.ERROR, "CreateFile C:\\Users\\me\\Pictures\\a.jpg: ACCESS DENIED",
+                        proc="Photos.exe"),
+                  event(101.2, "ETW", "File", b.ERROR, "[Kernel-File] Status=0xC0000022", proc="RuntimeBroker.exe"),
+                  event(101.4, "ProcMon", "Registry", b.ERROR, "RegOpenKey HKLM\\X: PRIVILEGE NOT HELD", proc="Photos.exe"),
+                  event(101.6, "Event Log", "Log", b.ERROR, "Application Error 1000 in Photos.exe"),
+                  event(101.8, "Files", "File", b.CHANGE, "File created: C:\\Users\\me\\AppData\\Local\\Packages\\x\\a.jpg")]
+        text, level, _detail = b.marker_summary(3, 100.0, events)
+        self.assertEqual(level, b.MARK)
+        self.assertEqual(text, "Marker 3: the wallpaper was not written in the 6 seconds after it, and access was refused 3 times "
+                               "(Photos.exe, RuntimeBroker.exe). 5 events (ProcMon 2, ETW 1, Event Log 1, Files 1), "
+                               "from Photos.exe, RuntimeBroker.exe")
+
+    def test_wallpaper_writes_are_told_apart_from_other_rows(self):
+        cases = [
+            (b.SRC_FILES, b.CHANGE, "File changed: C:\\U\\AppData\\Roaming\\Microsoft\\Windows\\Themes\\TranscodedWallpaper", True),
+            (b.SRC_FILES, b.CHANGE, "File created: C:\\U\\AppData\\Roaming\\Microsoft\\Windows\\Themes\\CachedFiles\\c.jpg", True),
+            (b.SRC_FILES, b.CHANGE, "File created: C:\\U\\AppData\\Roaming\\Microsoft\\Windows\\Themes\\Bastard_check.tmp", False),
+            (b.SRC_FILES, b.INFO, "File changed: C:\\U\\Themes\\TranscodedWallpaper", False),
+            (b.SRC_REG, b.CHANGE, "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Wallpapers [BackgroundType]: 0 -> 2", True),
+            (b.SRC_REG, b.CHANGE, "HKCU\\Control Panel\\Desktop [TranscodedImageCache]: <binary 3 KB> -> <binary 3 KB>", True),
+            (b.SRC_REG, b.CHANGE, "HKCU\\Control Panel\\Desktop [WheelScrollLines]: 3 -> 5", False),
+            (b.SRC_WMI, b.CHANGE, "WMI change: HKEY_USERS\\S-1-5-21-1\\Control Panel\\Desktop [WallPaper]", True),
+            (b.SRC_WALL, b.CHANGE, "Wallpaper changed: a.jpg -> b.jpg", True),
+            (b.SRC_WALL, b.INFO, "Wallpaper at start: a.jpg", False),
+            (b.SRC_ETW, b.CHANGE, "[Kernel-Registry] KeyName=\\REGISTRY\\USER\\S-1\\Control Panel\\Desktop | ValueName=WallPaper", True),
+        ]
+        for source, level, text, wanted in cases:
+            self.assertEqual(b.wallpaper_write(source, level, text), wanted, text)
+
+    def test_procmon_marker_lines_count_wallpaper_writes_and_refusals(self):
+        hub = b.Hub()
+        source = QuietProcMon(hub)
+        start = time.time()
+        source.session.markers = [(1, start), (2, start + 30)]
+        digest = b.ProcmonDigest(1, 1000)
+        digest.add(start + 1, "explorer.exe", OTHER_PID, "RegSetValue", "HKCU\\Control Panel\\Desktop\\WallPaper", "SUCCESS")
+        digest.add(start + 2, "explorer.exe", OTHER_PID, "WriteFile",
+                   "C:\\U\\AppData\\Roaming\\Microsoft\\Windows\\Themes\\TranscodedWallpaper", "SUCCESS")
+        digest.add(start + 3, "Photos.exe", OTHER_PID, "CreateFile", "C:\\U\\Pictures\\a.jpg", "ACCESS DENIED")
+        digest.add(start + 31, "Photos.exe", OTHER_PID, "CreateFile", "C:\\U\\Pictures\\b.jpg", "ACCESS DENIED")
+        source._publish(digest, "4 events")
+        marks = [ev.text for ev in drained(hub) if ev.kind == b.KIND_MARK]
+        self.assertEqual(marks, ["Marker 1: ProcMon listed 3 events in the 6 seconds after it, of which 2 wrote the "
+                                 "wallpaper and 1 was refused access",
+                                 "Marker 2: ProcMon listed 1 event in the 6 seconds after it, of which 1 was refused access"])
 
     def test_hub(self):
         hub = b.Hub()
@@ -2190,7 +2516,7 @@ class Timeline(unittest.TestCase):
             ev.repeat(ts)
         text, level, detail = b.marker_summary(1, 100.0, [ev])
         self.assertEqual(level, b.MARK)
-        self.assertEqual(text, "Marker 1: 3 events in the 6 seconds after it (Files 3), from x.exe")
+        self.assertEqual(text, "Marker 1: the wallpaper was not written in the 6 seconds after it. 3 events (Files 3), from x.exe")
         self.assertTrue(detail.endswith("RegQueryValue HKCU\\A (3 times)"), detail)
         self.assertEqual(ev.seen_between(106.0, 130.0), 2)
 
@@ -2217,7 +2543,7 @@ class Timeline(unittest.TestCase):
             session.request_stop()
             session.finish()
             summary = [ev.text for ev in drained(hub) if ev.text.startswith("Marker 1:")]
-            self.assertEqual(summary, ["Marker 1: 300 events in the 6 seconds after it (Files 300)"])
+            self.assertEqual(summary, ["Marker 1: the wallpaper was not written in the 6 seconds after it. 300 events (Files 300)"])
             with open(session.log_path, encoding="utf-8") as fh:
                 text = fh.read()
             self.assertIn("File changed: tick.txt (5 times)", text)
@@ -2370,7 +2696,8 @@ class Timeline(unittest.TestCase):
             session.request_stop()
             session.finish()
             summary = [ev.text for ev in drained(hub) if ev.text.startswith("Marker 1:")]
-            self.assertEqual(summary, ["Marker 1: 30000 events in the 6 seconds after it (Files 30000)"])
+            self.assertEqual(summary, ["Marker 1: the wallpaper was not written in the 6 seconds after it. 30000 events "
+                                       "(Files 30000)"])
         finally:
             b.PROGRAM_DIR = saved
             shutil.rmtree(folder, ignore_errors=True)
@@ -2707,6 +3034,24 @@ class Window(unittest.TestCase):
         self.assertEqual(app.btn_clear.cget("text"), "Clear")
         self.assertEqual(visual.index(str(app.btn_clear)), visual.index(str(app.btn_filter)) + 1)
         self.assertEqual(visual.index(str(app.btn_options)), visual.index(str(app.btn_clear)) + 1)
+
+    def test_the_export_button_sits_before_filter_and_saves_either_file(self):
+        scale = b.setup_style(self.root)
+        app = b.App(self.root, b.parse_options([]), scale)
+        bar = app.btn_options.master
+        packed = [child for child in bar.pack_slaves() if child.pack_info().get("side") == "right"]
+        visual = list(reversed([str(child) for child in packed]))
+        self.assertEqual(app.btn_export.cget("text"), "Export")
+        self.assertEqual(visual.index(str(app.btn_filter)), visual.index(str(app.btn_export)) + 1)
+        menu = app.export_popup
+        self.assertEqual(menu.index("end"), 1)
+        self.assertEqual([(menu.entrycget(index, "label"), menu.entrycget(index, "accelerator")) for index in (0, 1)],
+                         [("Save as CSV", "Ctrl+S"), ("Save as JSON", "Ctrl+J")])
+        asked = []
+        app.export = asked.append
+        menu.invoke(0)
+        menu.invoke(1)
+        self.assertEqual(asked, ["csv", "json"])
 
     def test_escape_closes_the_filter_and_options_windows(self):
         scale = b.setup_style(self.root)
@@ -3156,7 +3501,44 @@ class ReleaseGate(unittest.TestCase):
             code, out = self.gate(folder, lower, higher)
             self.assertEqual(code, 0, out)
             self.assertIn("Version 1.8.1 will be published", out)
+            self.assertIn("Release title: Bastard 1.8.1", out)
         finally:
+            shutil.rmtree(folder, ignore_errors=True)
+
+    def test_only_one_version_carries_a_release_name(self):
+        self.assertEqual(gate.release_title("1.11.0"), "Bastard 1.11.0 (Grok Tribute Release)")
+        self.assertEqual(gate.release_title("1.11.1"), "Bastard 1.11.1")
+        self.assertEqual(gate.release_title("1.10.2"), "Bastard 1.10.2")
+        self.assertEqual(list(gate.RELEASE_NAMES), ["1.11.0"])
+
+    def test_the_gate_hands_the_workflow_a_release_title(self):
+        folder = tempfile.mkdtemp(prefix="bastard_gate_")
+        outputs = os.path.join(folder, "outputs.txt")
+        saved = os.environ.get("GITHUB_OUTPUT")
+        here = os.getcwd()
+        try:
+            self.git(folder, "init", "-q", ".")
+            first = self.commit(folder, "1.10.2", [("1.10.2", "Bastard 1.10.2 is out.")], "[1.10.2] Bastard: ship it")
+            self.git(folder, "tag", "v1.10.2")
+            named = self.commit(folder, "1.11.0", [("1.11.0", "Bastard 1.11.0 is out."), ("1.10.2", "Bastard 1.10.2 is out.")],
+                                "[1.11.0] Bastard: ship the next one")
+            os.environ["GITHUB_OUTPUT"] = outputs
+            os.chdir(folder)
+            with contextlib.redirect_stdout(io.StringIO()):
+                code = gate.main(["--before", first, "--after", named, "--notes", os.path.join(folder, "notes.md")])
+            self.assertEqual(code, 0)
+            with open(outputs, encoding="utf-8") as fh:
+                lines = fh.read().splitlines()
+            self.assertEqual(lines, ["publish=true", "version=1.11.0", "title=Bastard 1.11.0 (Grok Tribute Release)"])
+            with open(os.path.join(ROOT, ".github", "workflows", "release.yml"), encoding="utf-8") as fh:
+                workflow = fh.read()
+            self.assertIn('--title "${{ steps.gate.outputs.title }}"', workflow)
+        finally:
+            os.chdir(here)
+            if saved is None:
+                os.environ.pop("GITHUB_OUTPUT", None)
+            else:
+                os.environ["GITHUB_OUTPUT"] = saved
             shutil.rmtree(folder, ignore_errors=True)
 
 
