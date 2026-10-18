@@ -53,8 +53,14 @@ jobs:
       - name: Unit tests
         run: python -m unittest discover -s tools -p "test_*.py" -v
 
+      - name: Write the version stamp
+        run: python tools/version_info.py --out version_info.txt
+
       - name: Build Bastard.exe
-        run: python -m PyInstaller --noconfirm --clean --onefile --windowed --name Bastard bastard.pyw
+        run: python -m PyInstaller --noconfirm --clean --onefile --windowed --name Bastard --version-file version_info.txt bastard.pyw
+
+      - name: Check the version stamp on Bastard.exe
+        run: python tools/version_info.py --check dist/Bastard.exe
 
       - name: Fetch Process Monitor for the self-test
         continue-on-error: true

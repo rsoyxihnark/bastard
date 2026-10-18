@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.12.0
+
+- Bastard.exe now carries its version, so Explorer lists it under File version without the program being started.
+
 ## 1.11.0
 
 - Bastard 1.11.0 says after each Marker whether the wallpaper was written, ends Probes with a verdict and checks many more settings.

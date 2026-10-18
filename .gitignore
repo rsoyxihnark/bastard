@@ -6,6 +6,7 @@ dist/
 .venv/
 venv/
 release_notes.md
+version_info.txt
 Exclusions.ini
 Bastard_*.log
 selftest/

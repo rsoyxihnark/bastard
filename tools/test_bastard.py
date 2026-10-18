@@ -1,3 +1,4 @@
+import ast
 import contextlib
 import csv
 import importlib
@@ -36,6 +37,7 @@ if selftest is None:
 SELFTEST_WORK = "C:\\Users\\RUNNER~1\\AppData\\Local\\Temp\\%sab12cd34\\watched" % selftest.WORK_PREFIX
 gate = importlib.import_module("release_gate")
 source_check = importlib.import_module("check_source")
+version_info = importlib.import_module("version_info")
 notes_sync = importlib.import_module("sync_release_notes")
 ROOT = os.path.dirname(HERE)
 
@@ -3540,6 +3542,33 @@ class ReleaseGate(unittest.TestCase):
             else:
                 os.environ["GITHUB_OUTPUT"] = saved
             shutil.rmtree(folder, ignore_errors=True)
+
+
+class VersionStamp(unittest.TestCase):
+    def test_the_stamp_is_written_from_the_version_in_the_source(self):
+        version = version_info.source_version()
+        self.assertEqual(version, b.VERSION)
+        text = version_info.version_file(version)
+        ast.parse(text, mode="eval")
+        self.assertIn("filevers=%s," % (version_info.numbers(version),), text)
+        self.assertIn("prodvers=%s," % (version_info.numbers(version),), text)
+        self.assertIn("StringStruct('FileVersion', '%s')" % version, text)
+        self.assertIn("StringStruct('ProductVersion', '%s')" % version, text)
+        self.assertIn("StringStruct('OriginalFilename', 'Bastard.exe')", text)
+
+    def test_a_version_of_three_parts_is_stamped_as_four(self):
+        self.assertEqual(version_info.numbers("2.3.4"), (2, 3, 4, 0))
+        self.assertEqual(version_info.numbers("10.0.0"), (10, 0, 0, 0))
+
+    def test_the_workflow_stamps_the_build_and_checks_what_it_built(self):
+        with open(os.path.join(ROOT, ".github", "workflows", "release.yml"), "r", encoding="utf-8") as fh:
+            workflow = fh.read()
+        wrote = workflow.index("python tools/version_info.py --out version_info.txt")
+        built = workflow.index("--version-file version_info.txt")
+        checked = workflow.index("python tools/version_info.py --check dist/Bastard.exe")
+        self.assertLess(wrote, built)
+        self.assertLess(built, checked)
+        self.assertLess(checked, workflow.index("name: Keep the build"))
 
 
 if __name__ == "__main__":
