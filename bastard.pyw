@@ -26,7 +26,7 @@ import tkinter as tk
 import tkinter.font as tkfont
 from tkinter import filedialog, messagebox, ttk
 
-VERSION = "1.12.0"
+VERSION = "1.12.1"
 
 APP_NAME = "Bastard"
 IS_WIN = os.name == "nt"
@@ -170,12 +170,9 @@ def find_data_dir():
 
 
 def find_program_dir():
-    try:
-        if getattr(sys, "frozen", False):
-            return os.path.dirname(os.path.abspath(sys.executable))
-        return os.path.dirname(os.path.abspath(__file__))
-    except Exception:
-        return os.getcwd()
+    if getattr(sys, "frozen", False):
+        return os.path.dirname(os.path.abspath(sys.executable))
+    return os.path.dirname(os.path.abspath(__file__))
 
 
 DESKTOP = find_desktop()
@@ -771,6 +768,7 @@ def marker_summary(number, start, events):
             seen = ev.seen_between(start, end)
             if seen:
                 found.append((ev, seen))
+    found.sort(key=lambda item: item[0].key())
     if not found:
         text = "Marker %d: nothing happened in the %d seconds after it" % (number, MARKER_WINDOW)
         return text, WARN, ""
@@ -3609,7 +3607,7 @@ class ProbeSource(Source):
             try:
                 probe()
             except Exception as exc:
-                self.emit(KIND_PROBE, "probe %s failed: %s" % (probe.__name__, one_line(exc, 160)), WARN)
+                self._say("probe %s failed: %s" % (probe.__name__, one_line(exc, 160)), WARN)
         if not self.stopping():
             self._summarize()
         self.status("done", "%s, %s" % (plural(len(self.problems), "problem"), plural(len(self.warnings), "warning")))
@@ -3720,23 +3718,9 @@ class ProbeSource(Source):
         path = "Software\\Microsoft\\Windows\\CurrentVersion\\Policies\\Explorer"
         flag = reg_read_value(hive, path, "DisallowRun")
         self._say("DisallowRun = %s" % ("unset" if flag is None else flag))
-        sub = path + "\\DisallowRun"
-        if not reg_key_exists(hive, sub):
-            return
-        try:
-            handle = winreg.OpenKey(hive, sub, 0, winreg.KEY_READ)
-        except OSError:
-            return
-        with handle:
-            index = 0
-            while True:
-                try:
-                    name, value, _kind = winreg.EnumValue(handle, index)
-                except OSError:
-                    break
-                index += 1
-                level = ERROR if str(value).lower() in PROBE_DISALLOW else INFO
-                self._say("DisallowRun [%s] = %s" % (name, value), level)
+        for name, value in reg_values(hive, path + "\\DisallowRun") or ():
+            level = ERROR if str(value).lower() in PROBE_DISALLOW else INFO
+            self._say("DisallowRun [%s] = %s" % (name, value), level)
 
     def _ifeo(self):
         self._say("E: Image File Execution Options")

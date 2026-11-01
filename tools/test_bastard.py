@@ -824,6 +824,26 @@ class NewSources(unittest.TestCase):
         self.assertEqual(rows["HKLM AppPrivacy [LetAppsAccessCamera_ForceDenyTheseApps] = Contoso.App_123"].level, b.INFO)
         self.assertEqual(missing, ["B: AppPrivacy policy", "AppPrivacy key is not there"])
 
+    def test_disallowrun_names_a_blocked_photos(self):
+        hub = b.Hub()
+        saved = (b.reg_values, b.reg_read_value, b.hive_handle)
+        try:
+            b.hive_handle = lambda name: name
+            b.reg_read_value = lambda _hive, _path, _name: 1
+            b.reg_values = lambda _hive, path: [("1", "Photos.exe"), ("2", "notepad.exe")] \
+                if path.endswith("\\DisallowRun") else None
+            b.ProbeSource(FakeSession(hub))._disallowrun()
+            rows = [(ev.text, ev.level) for ev in drained(hub)]
+            b.reg_values = lambda _hive, _path: None
+            hub = b.Hub()
+            b.ProbeSource(FakeSession(hub))._disallowrun()
+            missing = [ev.text for ev in drained(hub)]
+        finally:
+            b.reg_values, b.reg_read_value, b.hive_handle = saved
+        self.assertEqual(rows, [("D: DisallowRun policy", b.INFO), ("DisallowRun = 1", b.INFO),
+                                ("DisallowRun [1] = Photos.exe", b.ERROR), ("DisallowRun [2] = notepad.exe", b.INFO)])
+        self.assertEqual(missing, ["D: DisallowRun policy", "DisallowRun = 1"])
+
     def test_the_consent_store_is_read_for_photos_too(self):
         values = {("HKCU", b.CONSENT_STORE + "\\picturesLibrary"): "Allow",
                   ("HKCU", b.CONSENT_STORE + "\\picturesLibrary\\" + b.PHOTOS_FAMILY): "Deny",
@@ -997,6 +1017,27 @@ class NewSources(unittest.TestCase):
         self.assertTrue(rows[-1].text.startswith("Probes found"), rows[-1].text)
         self.assertIn("N: desktop background", [ev.text for ev in rows])
         self.assertIn("M: folder owners", [ev.text for ev in rows])
+
+    def test_a_probe_that_fails_counts_as_a_warning(self):
+        hub = b.Hub()
+        probe = b.ProbeSource(FakeSession(hub))
+
+        def _policy():
+            raise OSError("the key could not be read")
+
+        probe._policy = _policy
+        saved = (b.run_text, b.win32security)
+        try:
+            b.run_text = lambda _cmd, _timeout: (None, "not here")
+            b.win32security = None
+            probe._run()
+        finally:
+            b.run_text, b.win32security = saved
+        rows = drained(hub)
+        failed = [ev for ev in rows if ev.text == "probe _policy failed: the key could not be read"]
+        self.assertEqual([ev.level for ev in failed], [b.WARN])
+        self.assertIn(failed[0].text, probe.warnings)
+        self.assertIn("  " + failed[0].text, rows[-1].detail)
 
     def test_a_slideshow_background_is_pointed_out(self):
         for value, level, text in ((2, b.CHANGE, "the desktop background is a slideshow (BackgroundType 2)"),
@@ -2252,6 +2293,11 @@ class Timeline(unittest.TestCase):
                                "from Photos.exe, x.exe")
         self.assertEqual(len(detail.splitlines()), 5)
         self.assertTrue(detail.startswith("Bastard saw no write to TranscodedWallpaper"), detail)
+
+    def test_a_marker_summary_lists_its_rows_in_time_order(self):
+        events = [event(104.0, text="late"), event(101.0, text="early"), event(102.5, text="middle")]
+        _text, _level, detail = b.marker_summary(1, 100.0, events)
+        self.assertEqual([line.split()[-1] for line in detail.splitlines()[2:]], ["early", "middle", "late"])
 
     def test_a_marker_summary_says_when_the_wallpaper_was_written(self):
         events = [event(101.0, text="File changed: C:\\Users\\me\\AppData\\Roaming\\Microsoft\\Windows\\Themes\\TranscodedWallpaper"),

@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.12.1
+
+- Bastard 1.12.1 counts a Probes check that failed as a warning, and keeps the summary of a Marker placed just before Stop in time order.
+- Fixed Probes leaving a check that failed out of its warning count and its verdict.
+- Fixed the summary of a Marker placed just before Stop listing its events out of time order.
+
 ## 1.12.0
 
 - Bastard.exe now carries its version, so Explorer lists it under File version without the program being started.
