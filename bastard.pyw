@@ -26,7 +26,7 @@ import tkinter as tk
 import tkinter.font as tkfont
 from tkinter import filedialog, messagebox, ttk
 
-VERSION = "1.12.2"
+VERSION = "1.12.3"
 
 APP_NAME = "Bastard"
 IS_WIN = os.name == "nt"
@@ -3533,14 +3533,14 @@ REG_RIGHT_NAMES = (
     (0x00001, "QueryValues"),
 )
 PROBE_SHELL_VERBS = (
-    ("HKCR", "SystemFileAssociations\\.jpg\\shell\\setaswallpaper"),
-    ("HKCR", "SystemFileAssociations\\.jpeg\\shell\\setaswallpaper"),
-    ("HKCR", "SystemFileAssociations\\.png\\shell\\setaswallpaper"),
-    ("HKCR", "SystemFileAssociations\\image\\shell\\setaswallpaper"),
-    ("HKCR", "jpegfile\\shell\\setaswallpaper"),
-    ("HKCR", "pngfile\\shell\\setaswallpaper"),
-    ("HKCR", "Paint.Picture\\shell\\setaswallpaper"),
-    ("HKCU", "Software\\Classes\\SystemFileAssociations\\.jpg\\shell\\setaswallpaper"),
+    ("HKCR", "SystemFileAssociations\\.jpg\\shell\\setdesktopwallpaper"),
+    ("HKCR", "SystemFileAssociations\\.jpeg\\shell\\setdesktopwallpaper"),
+    ("HKCR", "SystemFileAssociations\\.png\\shell\\setdesktopwallpaper"),
+    ("HKCR", "SystemFileAssociations\\image\\shell\\setdesktopwallpaper"),
+    ("HKCR", "jpegfile\\shell\\setdesktopwallpaper"),
+    ("HKCR", "pngfile\\shell\\setdesktopwallpaper"),
+    ("HKCR", "Paint.Picture\\shell\\setdesktopwallpaper"),
+    ("HKCU", "Software\\Classes\\SystemFileAssociations\\.jpg\\shell\\setdesktopwallpaper"),
 )
 PROBE_IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".bmp")
 PROBE_SERVICES = ("Themes", "AppXSvc", "ClipSVC", "StateRepository", "TokenBroker", "camsvc", "BrokerInfrastructure",
@@ -3775,7 +3775,7 @@ class ProbeSource(Source):
             command = reg_read_value(hive, path + "\\command", "")
             self._say("%s %s command = %s" % (tag, path, command if command else "(default)"), CHANGE)
         if not found:
-            self._say("no setaswallpaper verb found in the usual places", ERROR)
+            self._say("no setdesktopwallpaper verb found in the usual places", ERROR)
         for ext in PROBE_IMAGE_EXTS:
             progid = reg_read_value(hive_handle("HKCR"), ext, "")
             if not progid:

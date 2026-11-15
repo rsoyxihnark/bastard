@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.12.3
+
+- Fixed Probes saying no set as wallpaper verb was found, and counting it as a problem, on every PC.
+
 ## 1.12.2
 
 - Bastard.exe no longer carries the old wmi package, and the WMI source reads the same events without it.
