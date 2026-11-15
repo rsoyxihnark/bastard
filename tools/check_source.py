@@ -19,6 +19,7 @@ BANNED = ("cl" "aude", "anth" "ropic", "co-auth" "ored-by")
 EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}")
 VERSION_RE = re.compile(r'^VERSION = "(\d+\.\d+\.\d+)"\r?$', re.M)
 HEADING_RE = re.compile(r"^## (.+?)\s*$")
+RUN_LESSON = "Valuable-Run-Lesson:"
 
 
 def tracked_files(root):
@@ -141,8 +142,12 @@ def check_python(path, text, report, strict=True):
             report.note(path, failed_line(exc), "could not be read as Python: %s" % exc)
             return
     for token in tokens:
-        if token.type == tokenize.COMMENT:
+        if token.type != tokenize.COMMENT:
+            continue
+        if not token.string.lstrip("#").strip().startswith(RUN_LESSON):
             report.error(path, token.start[0], "code comment")
+        elif len(token.string) > LIMIT:
+            report.error(path, token.start[0], "note is %d characters, the limit is %d" % (len(token.string), LIMIT))
     if tree is None:
         return
     for node in docstring_nodes(tree):

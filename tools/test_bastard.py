@@ -3501,6 +3501,15 @@ class SourceCheck(unittest.TestCase):
         self.assertEqual([note.split(": ", 1)[0] for note in report.notes], ["OldDevelopments/y.py:6"])
         self.assertEqual([error.split(": ", 1)[0] for error in report.errors], ["OldDevelopments/y.py:3"])
 
+    def test_a_run_lesson_note_passes_and_any_other_comment_does_not(self):
+        lesson = "# Valuable-Run-Lesson: seen only on a real run"
+        text = "\n".join(["a = 1  # note", "b = 2  " + lesson, "c = 3  # Valuable-Run-Lesson: " + "y" * 240, ""])
+        report = source_check.Report()
+        source_check.check_python("bastard.pyw", text, report)
+        self.assertEqual([error.split(": ", 1)[0] for error in report.errors], ["bastard.pyw:1", "bastard.pyw:3"])
+        self.assertIn("code comment", report.errors[0])
+        self.assertIn("the limit is 248", report.errors[1])
+
 
 class ReleaseGate(unittest.TestCase):
     def git(self, folder, *args):
