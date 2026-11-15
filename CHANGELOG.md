@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.12.2
+
+- Bastard.exe no longer carries the old wmi package, and the WMI source reads the same events without it.
+
 ## 1.12.1
 
 - Bastard 1.12.1 counts a Probes check that failed as a warning, and keeps the summary of a Marker placed just before Stop in time order.

@@ -168,6 +168,9 @@ def check(result, log, returncode):
         add("registry key deleted", has(events, "TraceSelfTest\\Sub deleted", source="Registry"))
         add("event log entry", has(events, "Trace self test event", source="Event Log"),
             info=log.get("eventcreate_output", ""))
+        started = [pid for pid in (log.get(key) for key in ("child_pid", "quick_pid", "notepad_pid")) if pid]
+        add("WMI saw a new process", any(ev["source"] == "WMI" and ev["pid"] in started for ev in events),
+            info=" ".join((status.get("WMI") or ["", ""])[:2]))
         add("wallpaper source ran", has(events, "Wallpaper at start", source="Wallpaper"))
         if result.get("admin"):
             quick = log.get("quick_pid")

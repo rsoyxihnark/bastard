@@ -26,7 +26,7 @@ import tkinter as tk
 import tkinter.font as tkfont
 from tkinter import filedialog, messagebox, ttk
 
-VERSION = "1.12.1"
+VERSION = "1.12.2"
 
 APP_NAME = "Bastard"
 IS_WIN = os.name == "nt"
@@ -65,14 +65,14 @@ except Exception:
     ProcmonLogsReader = None
     procmon_result_text = None
 
-wmi_module = None
+com_client = None
 pythoncom = None
 if IS_WIN:
     try:
-        import wmi as wmi_module
+        import win32com.client as com_client
         import pythoncom
     except Exception:
-        wmi_module = None
+        com_client = None
         pythoncom = None
 
 win32security = None
@@ -3352,6 +3352,10 @@ WMI_REG_TARGETS = (
     ("HKEY_CURRENT_USER", "Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Wallpapers", "BackgroundType"),
     ("HKEY_CURRENT_USER", "Software\\Microsoft\\Windows\\CurrentVersion\\Themes", "CurrentTheme"),
 )
+WMI_PROCESS_SPACE = "winmgmts:"
+WMI_REGISTRY_SPACE = "winmgmts:root/default"
+WMI_PROCESS_QUERY = "SELECT * FROM __InstanceCreationEvent WITHIN 1 WHERE TargetInstance ISA 'Win32_Process'"
+WMI_TIMED_OUT = 0x80043001
 
 
 def wmi_reg_target(hive, path, sid):
@@ -3362,49 +3366,64 @@ def wmi_reg_target(hive, path, sid):
     return hive, path.replace("\\", "\\\\")
 
 
+def wmi_reg_query(hive, path, name):
+    return "SELECT * FROM RegistryValueChangeEvent WHERE Hive = '%s' AND KeyPath = '%s' AND ValueName = '%s'" % (
+        hive, path, name)
+
+
+def wmi_value(item, name):
+    try:
+        return item.Properties_(name).Value
+    except Exception:
+        return None
+
+
+def wmi_timed_out(exc):
+    args = getattr(exc, "args", ())
+    codes = list(args[:1])
+    if len(args) > 2 and isinstance(args[2], tuple) and args[2]:
+        codes.append(args[2][-1])
+    return any(isinstance(code, int) and code & 0xFFFFFFFF == WMI_TIMED_OUT for code in codes)
+
+
 class WmiSource(Source):
     name = SRC_WMI
 
     def start(self):
-        self.timeout_exc = None
         if not IS_WIN:
             self.status("off", "Windows only")
             return
-        if wmi_module is None or pythoncom is None:
-            self.status("off", "wmi or pywin32 missing")
-            self.note("install wmi and pywin32 to use the WMI watchers", INFO)
+        if com_client is None or pythoncom is None:
+            self.status("off", "pywin32 missing")
+            self.note("install pywin32 to use the WMI watchers", INFO)
             return
-        self.timeout_exc = getattr(wmi_module, "x_wmi_timed_out", None)
         self.status("starting", "connecting")
         self.spawn(self._proc_watch, "process")
         self.spawn(self._reg_watch, "registry")
 
-    def _is_timeout(self, exc):
-        return self.timeout_exc is not None and isinstance(exc, self.timeout_exc)
-
     def _proc_watch(self):
         pythoncom.CoInitialize()
         try:
-            conn = wmi_module.WMI()
-            watcher = conn.Win32_Process.watch_for("creation")
+            watcher = com_client.GetObject(WMI_PROCESS_SPACE).ExecNotificationQuery(WMI_PROCESS_QUERY)
             self.status("running", "process and registry")
             while not self.stopping():
                 try:
-                    hit = watcher(timeout_ms=1000)
+                    hit = watcher.NextEvent(1000)
                 except Exception as exc:
-                    if self._is_timeout(exc):
+                    if wmi_timed_out(exc):
                         continue
                     if self.stopping():
                         break
                     self.note("WMI process watcher stopped: %s" % one_line(exc, 200), WARN)
                     break
+                hit = wmi_value(hit, "TargetInstance") if hit else None
                 if not hit:
                     continue
-                pid = as_int(getattr(hit, "ProcessId", 0), 0)
-                name = getattr(hit, "Name", "") or ""
-                if ours(pid, name, as_int(getattr(hit, "ParentProcessId", 0), 0)):
+                pid = as_int(wmi_value(hit, "ProcessId"), 0)
+                name = wmi_value(hit, "Name") or ""
+                if ours(pid, name, as_int(wmi_value(hit, "ParentProcessId"), 0)):
                     continue
-                cmd = getattr(hit, "CommandLine", "") or ""
+                cmd = wmi_value(hit, "CommandLine") or ""
                 detail = "Name: %s\nPID: %s\nCommand line: %s" % (name, pid, cmd)
                 self.emit(KIND_PROC, "WMI saw a new process: %s" % process_label(name, pid), INFO,
                           pid=pid or None, proc=name, detail=detail)
@@ -3420,15 +3439,15 @@ class WmiSource(Source):
     def _reg_watch(self):
         pythoncom.CoInitialize()
         try:
-            conn = wmi_module.WMI(namespace="default")
+            service = com_client.GetObject(WMI_REGISTRY_SPACE)
             watchers = []
             for hive, path, name in WMI_REG_TARGETS:
                 target = wmi_reg_target(hive, path, self.session.user_sid)
                 if target is None:
                     continue
                 try:
-                    watchers.append((conn.RegistryValueChangeEvent.watch_for(Hive=target[0], KeyPath=target[1],
-                                                                             ValueName=name), hive, path, name))
+                    watchers.append((service.ExecNotificationQuery(wmi_reg_query(target[0], target[1], name)),
+                                     hive, path, name))
                 except Exception:
                     pass
             if not watchers:
@@ -3439,9 +3458,9 @@ class WmiSource(Source):
                     if self.stopping():
                         break
                     try:
-                        hit = watcher(timeout_ms=500)
+                        hit = watcher.NextEvent(500)
                     except Exception as exc:
-                        if not self._is_timeout(exc):
+                        if not wmi_timed_out(exc):
                             self.wait(0.5)
                         continue
                     if hit:

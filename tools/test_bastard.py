@@ -455,19 +455,17 @@ class NewSources(unittest.TestCase):
         self.assertEqual(b.wmi_reg_target("HKEY_LOCAL_MACHINE", "SOFTWARE\\X", ""), ("HKEY_LOCAL_MACHINE", "SOFTWARE\\\\X"))
         calls = []
 
-        class Event:
-            def watch_for(self, **where):
-                calls.append(where)
+        class Service:
+            @staticmethod
+            def ExecNotificationQuery(wql):
+                calls.append(wql)
                 raise RuntimeError("no events here")
-
-        class Connection:
-            RegistryValueChangeEvent = Event()
 
         class Module:
             @staticmethod
-            def WMI(**options):
-                calls.append(options)
-                return Connection()
+            def GetObject(moniker):
+                calls.append(moniker)
+                return Service()
 
         class Com:
             @staticmethod
@@ -485,49 +483,58 @@ class NewSources(unittest.TestCase):
                 self.hub = hub
 
         hub = b.Hub(b.Exclusions(()))
-        saved = (b.wmi_module, b.pythoncom)
+        saved = (b.com_client, b.pythoncom)
         try:
-            b.wmi_module, b.pythoncom = Module, Com
+            b.com_client, b.pythoncom = Module, Com
             b.WmiSource(Quiet(hub))._reg_watch()
         finally:
-            b.wmi_module, b.pythoncom = saved
-        self.assertEqual(calls[0], {"namespace": "default"})
-        self.assertEqual(calls[1], {"Hive": "HKEY_USERS", "KeyPath": "S-1-5-21-7\\\\Control Panel\\\\Desktop",
-                                    "ValueName": "WallPaper"})
+            b.com_client, b.pythoncom = saved
+        self.assertEqual(calls[0], "winmgmts:root/default")
+        self.assertEqual(calls[1], "SELECT * FROM RegistryValueChangeEvent WHERE Hive = 'HKEY_USERS' AND "
+                                   "KeyPath = 'S-1-5-21-7\\\\Control Panel\\\\Desktop' AND ValueName = 'WallPaper'")
         self.assertEqual(len(calls), 1 + len(b.WMI_REG_TARGETS))
+
+    def test_only_a_wmi_timeout_counts_as_a_timeout(self):
+        class ComError(Exception):
+            pass
+
+        self.assertTrue(b.wmi_timed_out(ComError(-2147209215, "timed out", None, None)))
+        self.assertTrue(b.wmi_timed_out(ComError(-2147352567, "Exception occurred.",
+                                                 (0, "SWbemEventSource", "Timed out", None, 0, -2147209215), None)))
+        self.assertFalse(b.wmi_timed_out(ComError(-2147352567, "Exception occurred.",
+                                                  (0, "SWbemServicesEx", "Access denied", None, 0, -2147217405), None)))
+        self.assertFalse(b.wmi_timed_out(RuntimeError("the WMI service went away")))
 
     def test_a_broken_wmi_registry_watcher_waits_instead_of_spinning(self):
         calls = []
         first = threading.Event()
 
-        def broken(timeout_ms):
-            calls.append(timeout_ms)
-            first.set()
-            raise RuntimeError("the WMI service went away")
-
-        class Event:
+        class Broken:
             @staticmethod
-            def watch_for(**_where):
-                return broken
+            def NextEvent(timeout_ms):
+                calls.append(timeout_ms)
+                first.set()
+                raise RuntimeError("the WMI service went away")
 
-        class Connection:
-            RegistryValueChangeEvent = Event()
+        class Service:
+            @staticmethod
+            def ExecNotificationQuery(_wql):
+                return Broken()
 
         class Module:
             @staticmethod
-            def WMI(**_options):
-                return Connection()
+            def GetObject(_moniker):
+                return Service()
 
         class Com:
             CoInitialize = CoUninitialize = staticmethod(lambda: None)
 
         session = FakeSession()
         session.user_sid = "S-1-5-21-7"
-        saved = (b.wmi_module, b.pythoncom)
+        saved = (b.com_client, b.pythoncom)
         try:
-            b.wmi_module, b.pythoncom = Module, Com
+            b.com_client, b.pythoncom = Module, Com
             source = b.WmiSource(session)
-            source.timeout_exc = None
             worker = threading.Thread(target=source._reg_watch)
             worker.start()
             first.wait(5.0)
@@ -535,7 +542,7 @@ class NewSources(unittest.TestCase):
             session.stop_event.set()
             worker.join(5.0)
         finally:
-            b.wmi_module, b.pythoncom = saved
+            b.com_client, b.pythoncom = saved
         self.assertFalse(worker.is_alive())
         self.assertLess(len(calls), 5)
 
@@ -669,26 +676,34 @@ class NewSources(unittest.TestCase):
                 return None
 
         class Hit:
-            def __init__(self, pid, ppid, name):
-                self.ProcessId = pid
-                self.ParentProcessId = ppid
-                self.Name = name
-                self.CommandLine = name
+            def __init__(self, values):
+                self.values = values
+
+            def Properties_(self, name):
+                return type("Property", (), {"Value": self.values[name]})()
+
+        def process(pid, ppid, name):
+            return Hit({"TargetInstance": Hit({"ProcessId": pid, "ParentProcessId": ppid, "Name": name,
+                                               "CommandLine": name})})
 
         session = FakeSession(b.Hub())
-        hits = [Hit(4321, 100, "sc.exe"), Hit(4400, 640, "notepad.exe"), Hit(4500, 200, "conhost.exe")]
+        hits = [process(4321, 100, "sc.exe"), process(4400, 640, "notepad.exe"), process(4500, 200, "conhost.exe")]
+        queries = []
 
-        def watcher(timeout_ms=0):
-            if hits:
-                return hits.pop(0)
-            session.stop_event.set()
-            return None
+        class Watcher:
+            @staticmethod
+            def NextEvent(timeout_ms):
+                if hits:
+                    return hits.pop(0)
+                session.stop_event.set()
+                return None
 
         class Module:
             @staticmethod
-            def WMI(**_options):
-                process = type("Process", (), {"watch_for": staticmethod(lambda _kind: watcher)})
-                return type("Connection", (), {"Win32_Process": process})()
+            def GetObject(moniker):
+                queries.append(moniker)
+                query = staticmethod(lambda wql: queries.append(wql) or Watcher())
+                return type("Service", (), {"ExecNotificationQuery": query})()
 
         class Com:
             @staticmethod
@@ -726,15 +741,14 @@ class NewSources(unittest.TestCase):
             def _dialog_texts(self, _hwnd):
                 return []
 
-        saved = (b.wmi_module, b.pythoncom, b.psutil, b.OWN_TREE)
+        saved = (b.com_client, b.pythoncom, b.psutil, b.OWN_TREE)
         try:
-            b.wmi_module, b.pythoncom = Module, Com
+            b.com_client, b.pythoncom = Module, Com
             b.psutil = type("Psutil", (), {"Process": Proc})
             b.OWN_TREE = b.OwnTree(100)
             b.OWN_TREE.note(200, 100, None, "powershell.exe")
             b.OWN_TREE.note(300, 100, None, "Procmon64.exe")
             wmi = b.WmiSource(session)
-            wmi.timeout_exc = None
             wmi._proc_watch()
             windows = Windows(session.hub, {1: (300, "Procmon64.exe", ""), 2: (900, "explorer.exe", "")})
             for kind in (b.EVENT_OBJECT_CREATE, b.EVENT_OBJECT_SHOW, b.EVENT_SYSTEM_FOREGROUND,
@@ -742,11 +756,12 @@ class NewSources(unittest.TestCase):
                 for hwnd in (1, 2):
                     windows._on_event(None, kind, hwnd, 0, 0, 0, 0)
         finally:
-            b.wmi_module, b.pythoncom, b.psutil, b.OWN_TREE = saved
+            b.com_client, b.pythoncom, b.psutil, b.OWN_TREE = saved
         events = drained(session.hub)
         self.assertEqual(windows.failures, 0)
         self.assertEqual([ev.text for ev in events if ev.source == b.SRC_WMI],
                          ["WMI saw a new process: notepad.exe (PID 4400)"])
+        self.assertEqual(queries, ["winmgmts:", b.WMI_PROCESS_QUERY])
         shown = [ev.text for ev in events if ev.source == b.SRC_WIN]
         self.assertEqual(len(shown), 6, shown)
         self.assertTrue(all(text.endswith("Window 2 (explorer.exe)") for text in shown), shown)
