@@ -11,7 +11,6 @@ import os
 import platform
 import queue
 import re
-import shutil
 import subprocess
 import sys
 import threading
@@ -26,7 +25,7 @@ import tkinter as tk
 import tkinter.font as tkfont
 from tkinter import filedialog, messagebox, ttk
 
-VERSION = "1.12.4"
+VERSION = "1.12.5"
 
 APP_NAME = "Bastard"
 IS_WIN = os.name == "nt"
@@ -300,6 +299,16 @@ def run_hidden(cmd, timeout):
             pass
         raise
     return subprocess.CompletedProcess(cmd, proc.returncode, out, err)
+
+
+def find_tool(name):
+    folders = [os.path.join(os.environ.get("SystemRoot", "C:\\Windows"), "System32")]
+    folders += [path for path in os.environ.get("PATH", "").split(os.pathsep) if os.path.isabs(path)]
+    for folder in folders:
+        path = os.path.join(folder, name)
+        if os.path.isfile(path):
+            return path
+    return os.path.join(PROGRAM_DIR, name)
 
 
 EARLIEST_TIME = 946684800.0
@@ -1672,7 +1681,6 @@ class RegistrySource(Source):
             if missing:
                 detail += "\n\nNot there yet:\n" + "\n".join(missing)
             self.note("watching " + plural(len(self.watches), "key"), INFO, detail)
-            last_full = time.time()
             while not self.stopping():
                 armed = [watch for watch in self.watches if watch.mode == "notify"]
                 if armed:
@@ -1699,11 +1707,6 @@ class RegistrySource(Source):
                             self._rescan(watch)
                         if watch.mode == "poll" and now >= watch.next_check:
                             self._open(watch, False)
-                if now - last_full >= 15.0:
-                    last_full = now
-                    for watch in self.watches:
-                        if watch.mode == "notify":
-                            self._rescan(watch)
                 self._update_status()
         finally:
             for watch in self.watches:
@@ -2424,10 +2427,8 @@ EVENT_SPLIT_RE = re.compile(r"<Event[\s>].*?</Event>", re.S)
 
 
 def find_wevtutil():
-    path = os.path.join(os.environ.get("SystemRoot", "C:\\Windows"), "System32", "wevtutil.exe")
-    if os.path.isfile(path):
-        return path
-    return shutil.which("wevtutil") or ""
+    path = find_tool("wevtutil.exe")
+    return path if os.path.isfile(path) else ""
 
 
 def decode_tool_output(raw):
@@ -2921,7 +2922,7 @@ class ProcMonSource(Source):
         if not self._procmon_pids():
             return True
         for pid in self._procmon_pids():
-            _safe(lambda: run_hidden(["taskkill", "/PID", str(pid), "/T"], 15))
+            _safe(lambda: run_hidden([find_tool("taskkill.exe"), "/PID", str(pid), "/T"], 15))
         if self._wait_gone(3.0 if abort else 12.0):
             return True
         self.status("finishing", "asking ProcMon to stop")
@@ -2929,7 +2930,7 @@ class ProcMonSource(Source):
         if self._wait_gone(3.0 if abort else 8.0):
             return True
         for pid in self._procmon_pids():
-            _safe(lambda: run_hidden(["taskkill", "/F", "/PID", str(pid), "/T"], 15))
+            _safe(lambda: run_hidden([find_tool("taskkill.exe"), "/F", "/PID", str(pid), "/T"], 15))
         time.sleep(1.0)
         return False
 
@@ -3737,8 +3738,12 @@ class ProbeSource(Source):
         path = "Software\\Microsoft\\Windows\\CurrentVersion\\Policies\\Explorer"
         flag = reg_read_value(hive, path, "DisallowRun")
         self._say("DisallowRun = %s" % ("unset" if flag is None else flag))
+        machine = reg_read_value(hive_handle("HKLM"), path, "DisallowRun")
+        if machine is not None:
+            self._say("HKLM DisallowRun = %s" % machine)
+        on = as_int(flag, 0) != 0 or as_int(machine, 0) != 0
         for name, value in reg_values(hive, path + "\\DisallowRun") or ():
-            level = ERROR if str(value).lower() in PROBE_DISALLOW else INFO
+            level = ERROR if on and str(value).lower() in PROBE_DISALLOW else INFO
             self._say("DisallowRun [%s] = %s" % (name, value), level)
 
     def _ifeo(self):
@@ -3801,7 +3806,7 @@ class ProbeSource(Source):
         self._say("G: WinRT lock screen and Photos package")
         names = ",".join("'%s'" % name for name, _use in PROBE_PACKAGES)
         script = "".join(WINRT_SCRIPT) + "".join(WINRT_PACKAGE_SCRIPT) % names
-        code, out = run_text(["powershell", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+        code, out = run_text([find_tool("powershell.exe"), "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
                               "-WindowStyle", "Hidden", "-Command", script], 40)
         if code is None:
             self._say("WinRT read failed: %s" % out, WARN)
@@ -3848,7 +3853,7 @@ class ProbeSource(Source):
             self._say("%s is installed, version %s" % (name, version or "unknown"))
 
     def _rights(self, label, path):
-        code, out = run_text(["icacls", path], 20)
+        code, out = run_text([find_tool("icacls.exe"), path], 20)
         if code is None:
             self._say("%s: the rights could not be read: %s" % (label, out), WARN)
             return
@@ -3902,7 +3907,7 @@ class ProbeSource(Source):
     def _services(self):
         self._say("J: services")
         for svc in PROBE_SERVICES:
-            code, out = run_text(["sc", "query", svc], 10)
+            code, out = run_text([find_tool("sc.exe"), "query", svc], 10)
             if code is None:
                 self._say("sc query %s failed: %s" % (svc, out), WARN)
                 continue
@@ -4093,8 +4098,8 @@ class TraceToolSource(Source):
         except Exception as exc:
             self.note("logman provider file failed: %s" % one_line(exc, 160), WARN)
             return False
-        run_text(["logman", "stop", self.logman_session, "-ets"], 20)
-        code, out = run_text(["logman", "create", "trace", self.logman_session, "-ow", "-o", self.etl, "-pf",
+        run_text([find_tool("logman.exe"), "stop", self.logman_session, "-ets"], 20)
+        code, out = run_text([find_tool("logman.exe"), "create", "trace", self.logman_session, "-ow", "-o", self.etl, "-pf",
                               provider_file, "-nb", "16", "16", "-bs", "1024", "-ets"], 30)
         if code != 0:
             self.note("logman create did not work: %s" % one_line(out, 200), INFO)
@@ -4104,7 +4109,7 @@ class TraceToolSource(Source):
 
     def _start_wpr(self):
         self.etl = os.path.join(TRACE_DIR, "Bastard_wpr_%s.etl" % self.session.stamp_text)
-        code, out = run_text(["wpr", "-start", "FileIO", "-start", "Registry", "-filemode"], 40)
+        code, out = run_text([find_tool("wpr.exe"), "-start", "FileIO", "-start", "Registry", "-filemode"], 40)
         if code != 0:
             self.note("WPR start did not work: %s" % one_line(out, 200), INFO)
             return False
@@ -4113,9 +4118,9 @@ class TraceToolSource(Source):
 
     def _stop_capture(self):
         if self.mode == "logman":
-            run_text(["logman", "stop", self.logman_session, "-ets"], 40)
+            run_text([find_tool("logman.exe"), "stop", self.logman_session, "-ets"], 40)
         elif self.mode == "WPR":
-            run_text(["wpr", "-stop", self.etl], 90)
+            run_text([find_tool("wpr.exe"), "-stop", self.etl], 90)
 
     def stop(self):
         if self.started_ok and not self.stopped:
@@ -4135,7 +4140,7 @@ class TraceToolSource(Source):
             return
         csv_path = os.path.splitext(self.etl)[0] + ".csv"
         self.status("finishing", "decoding with tracerpt")
-        code, out = run_text(["tracerpt", self.etl, "-of", "CSV", "-o", csv_path, "-y"], 180)
+        code, out = run_text([find_tool("tracerpt.exe"), self.etl, "-of", "CSV", "-o", csv_path, "-y"], 180)
         if code != 0 or not os.path.isfile(csv_path):
             self.status("failed", "tracerpt failed")
             self.note("tracerpt could not decode the capture: %s" % one_line(out, 200), WARN,

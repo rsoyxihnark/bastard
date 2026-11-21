@@ -840,24 +840,100 @@ class NewSources(unittest.TestCase):
         self.assertEqual(missing, ["B: AppPrivacy policy", "AppPrivacy key is not there"])
 
     def test_disallowrun_names_a_blocked_photos(self):
-        hub = b.Hub()
         saved = (b.reg_values, b.reg_read_value, b.hive_handle)
+
+        def run(switches, listed):
+            hub = b.Hub()
+            b.reg_read_value = lambda hive, _path, _name: switches.get(hive)
+            b.reg_values = lambda _hive, path: listed if path.endswith("\\DisallowRun") else None
+            b.ProbeSource(FakeSession(hub))._disallowrun()
+            return [(ev.text, ev.level) for ev in drained(hub)]
+
+        listed = [("1", "Photos.exe"), ("2", "notepad.exe")]
         try:
             b.hive_handle = lambda name: name
-            b.reg_read_value = lambda _hive, _path, _name: 1
-            b.reg_values = lambda _hive, path: [("1", "Photos.exe"), ("2", "notepad.exe")] \
-                if path.endswith("\\DisallowRun") else None
-            b.ProbeSource(FakeSession(hub))._disallowrun()
-            rows = [(ev.text, ev.level) for ev in drained(hub)]
-            b.reg_values = lambda _hive, _path: None
-            hub = b.Hub()
-            b.ProbeSource(FakeSession(hub))._disallowrun()
-            missing = [ev.text for ev in drained(hub)]
+            rows = run({"HKCU": 1}, listed)
+            missing = run({"HKCU": 1}, None)
+            off = run({"HKCU": 0}, listed)
+            machine = run({"HKLM": 1}, listed)
         finally:
             b.reg_values, b.reg_read_value, b.hive_handle = saved
         self.assertEqual(rows, [("D: DisallowRun policy", b.INFO), ("DisallowRun = 1", b.INFO),
                                 ("DisallowRun [1] = Photos.exe", b.ERROR), ("DisallowRun [2] = notepad.exe", b.INFO)])
-        self.assertEqual(missing, ["D: DisallowRun policy", "DisallowRun = 1"])
+        self.assertEqual([text for text, _level in missing], ["D: DisallowRun policy", "DisallowRun = 1"])
+        self.assertEqual(off[1:], [("DisallowRun = 0", b.INFO), ("DisallowRun [1] = Photos.exe", b.INFO),
+                                   ("DisallowRun [2] = notepad.exe", b.INFO)])
+        self.assertEqual(machine[1:], [("DisallowRun = unset", b.INFO), ("HKLM DisallowRun = 1", b.INFO),
+                                       ("DisallowRun [1] = Photos.exe", b.ERROR),
+                                       ("DisallowRun [2] = notepad.exe", b.INFO)])
+
+    def test_windows_tools_are_taken_from_windows_before_the_folder_bastard_runs_from(self):
+        home = tempfile.mkdtemp()
+        saved = (os.environ.get("SystemRoot"), os.environ.get("PATH"), b.PROGRAM_DIR)
+        system = os.path.join(home, "Windows", "System32")
+        extra = os.path.join(home, "Tools")
+        try:
+            b.PROGRAM_DIR = os.path.join(home, "Downloads")
+            for folder in (system, extra, b.PROGRAM_DIR):
+                os.makedirs(folder)
+            for folder, name in ((system, "sc.exe"), (extra, "wpr.exe"), (b.PROGRAM_DIR, "sc.exe"),
+                                 (b.PROGRAM_DIR, "wpr.exe"), (b.PROGRAM_DIR, "odd.exe")):
+                open(os.path.join(folder, name), "w").close()
+            os.environ["SystemRoot"] = os.path.join(home, "Windows")
+            os.environ["PATH"] = os.pathsep.join(["Downloads", extra])
+            found = [b.find_tool(name) for name in ("sc.exe", "wpr.exe", "odd.exe", "gone.exe")]
+        finally:
+            for name, value in zip(("SystemRoot", "PATH"), saved[:2]):
+                if value is None:
+                    os.environ.pop(name, None)
+                else:
+                    os.environ[name] = value
+            b.PROGRAM_DIR = saved[2]
+            shutil.rmtree(home, ignore_errors=True)
+        self.assertEqual(found, [os.path.join(system, "sc.exe"), os.path.join(extra, "wpr.exe"),
+                                 os.path.join(home, "Downloads", "odd.exe"), os.path.join(home, "Downloads", "gone.exe")])
+
+    def test_every_windows_tool_is_started_by_its_full_path(self):
+        with io.open(SOURCE, "r", encoding="utf-8") as fh:
+            tree = ast.parse(fh.read())
+        bare = [node.lineno for node in ast.walk(tree) if isinstance(node, ast.Call)
+                and getattr(node.func, "id", "") in ("run_text", "run_hidden") and node.args
+                and isinstance(node.args[0], ast.List) and node.args[0].elts
+                and isinstance(node.args[0].elts[0], ast.Constant)]
+        self.assertEqual(bare, [])
+
+    def test_registry_reads_a_watched_key_again_only_when_windows_says_it_changed(self):
+        session = FakeSession()
+        source = b.RegistrySource(session)
+        source.watches = [b._RegWatch("HKCU\\Control Panel\\Desktop", None, "Control Panel\\Desktop")]
+        source.status_note = None
+        clock = {"now": 1000.0, "waits": 0}
+        rescans = []
+
+        def opened(watch, _initial):
+            watch.mode = "notify"
+            watch.event = 1
+
+        def wait(_count, _handles, _all, _ms):
+            clock["now"] += 5.0
+            clock["waits"] += 1
+            if clock["waits"] == 8:
+                session.stop_event.set()
+            return 0 if clock["waits"] == 4 else b.WAIT_TIMEOUT
+
+        source._open = opened
+        source._rescan = rescans.append
+        source._arm = lambda _watch: True
+        source._close_handle = lambda _watch: None
+        source.api = type("Api", (), {"kernel": type("Kernel", (), {
+            "WaitForMultipleObjects": staticmethod(wait), "CloseHandle": staticmethod(lambda _handle: True)})})
+        saved = b.time
+        try:
+            b.time = type("Clock", (), {"time": staticmethod(lambda: clock["now"])})
+            source._run()
+        finally:
+            b.time = saved
+        self.assertEqual(rescans, source.watches)
 
     def test_the_consent_store_is_read_for_photos_too(self):
         values = {("HKCU", b.CONSENT_STORE + "\\picturesLibrary"): "Allow",

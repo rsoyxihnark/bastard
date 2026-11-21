@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.12.5
+
+- Fixed Bastard running a copy of a Windows tool, such as sc.exe, found next to it instead of the one Windows ships.
+- Fixed Registry reading every watched key again in full every 15 seconds even when nothing in it had changed.
+- Fixed Probes marking a program in the DisallowRun list as a problem while DisallowRun is off, and Probes now also reads it under HKLM.
+
 ## 1.12.4
 
 - Fixed Probes marking every TranscodedWallpaper rights line as a problem when the user or PC name contains deny, such as Denys.
