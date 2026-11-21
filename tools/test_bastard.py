@@ -1054,6 +1054,19 @@ class NewSources(unittest.TestCase):
         self.assertIn(failed[0].text, probe.warnings)
         self.assertIn("  " + failed[0].text, rows[-1].detail)
 
+    def test_only_a_deny_entry_in_the_rights_is_a_problem(self):
+        out = ("C:\\Users\\Denys\\AppData\\Roaming\\Microsoft\\Windows\\Themes\\TranscodedWallpaper "
+               "DESKTOP-1\\Denys:(F)\n    Everyone:(DENY)(W)\n\nSuccessfully processed 1 files")
+        hub = b.Hub()
+        saved = b.run_text
+        try:
+            b.run_text = lambda _cmd, _timeout: (0, out)
+            b.ProbeSource(FakeSession(hub))._rights("TranscodedWallpaper", "x")
+        finally:
+            b.run_text = saved
+        rows = [(ev.text.split(" ")[-1], ev.level) for ev in drained(hub)]
+        self.assertEqual(rows, [("DESKTOP-1\\Denys:(F)", b.INFO), ("Everyone:(DENY)(W)", b.ERROR)])
+
     def test_a_slideshow_background_is_pointed_out(self):
         for value, level, text in ((2, b.CHANGE, "the desktop background is a slideshow (BackgroundType 2)"),
                                    (3, b.CHANGE, "the desktop background is Windows Spotlight (BackgroundType 3)"),
@@ -3245,6 +3258,24 @@ class Window(unittest.TestCase):
             saved = json.load(fh)
         self.assertEqual(saved["show"], 0)
         self.assertTrue(saved["sources"][b.SRC_PROC])
+
+    def test_a_key_that_leaves_the_search_as_it_was_redraws_nothing(self):
+        app = b.App(self.root, b.parse_options([]), b.setup_style(self.root))
+        app.search_var.set("photos")
+        app._search_apply()
+        self.assertIsNotNone(app.rebuild_job)
+        self.root.after_cancel(app.rebuild_job)
+        app.rebuild_job = None
+        app.search_var.set("Photos ")
+        app._search_apply()
+        self.assertIsNone(app.rebuild_job)
+        app._search_clear()
+        self.assertIsNotNone(app.rebuild_job)
+        self.root.after_cancel(app.rebuild_job)
+        app.rebuild_job = None
+        app._search_clear()
+        self.assertIsNone(app.rebuild_job)
+        self.assertEqual(app.terms, [])
 
     def test_a_sorted_list_takes_new_rows_without_a_full_redraw(self):
         scale = b.setup_style(self.root)

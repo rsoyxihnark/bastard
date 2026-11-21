@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.12.4
+
+- Fixed Probes marking every TranscodedWallpaper rights line as a problem when the user or PC name contains deny, such as Denys.
+- Fixed the event list redrawing in full, and pausing, after a key in Search that left the search as it was, such as an arrow key.
+
 ## 1.12.3
 
 - Fixed Probes saying no set as wallpaper verb was found, and counting it as a problem, on every PC.

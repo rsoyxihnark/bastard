@@ -26,7 +26,7 @@ import tkinter as tk
 import tkinter.font as tkfont
 from tkinter import filedialog, messagebox, ttk
 
-VERSION = "1.12.3"
+VERSION = "1.12.4"
 
 APP_NAME = "Bastard"
 IS_WIN = os.name == "nt"
@@ -3856,7 +3856,7 @@ class ProbeSource(Source):
             line = line.strip()
             if not line or line.lower().startswith("successfully processed"):
                 continue
-            self._say("%s: %s" % (label, line), ERROR if "DENY" in line.upper() else INFO)
+            self._say("%s: %s" % (label, line), ERROR if "(DENY)" in line.upper() else INFO)
 
     def _transcoded(self):
         self._say("H: TranscodedWallpaper")
@@ -5205,11 +5205,12 @@ class App:
 
     def _search_apply(self):
         self.search_job = None
-        self._filters_changed()
+        if self.search_var.get().lower().split() != self.terms:
+            self._filters_changed()
 
     def _search_clear(self, _event=None):
         self.search_var.set("")
-        self._filters_changed()
+        self._search_apply()
         return "break"
 
     def _focus_search(self, _event=None):
