@@ -1,5 +1,21 @@
 # Changelog
 
+## 1.13.0
+
+- The title bar of Bastard and its dialogs is now dark on Windows 10 and 11, to match the rest of the window.
+- Bastard now has its own icon in the title bar, on the taskbar and next to its name at the top of the window.
+- A blinking REC light now sits next to the timer while a trace runs, and the timer turns white.
+- A line under the buttons now turns red while a trace runs, yellow while it finishes and green once it is saved.
+- The line under the buttons now flashes purple each time you press Marker.
+- Markers, problems and warnings now have a tinted row in the event list, so they stand out while you scroll.
+- An empty event list now says what to do next, such as Press Start or F5 to begin one.
+- Each button at the top now shows a tip with what it does and its shortcut key when you hover over it.
+- A source in the sources panel now lights up under the pointer, to show that a click hides it.
+- The sorted column now shows a triangle that points the way the list is sorted.
+- Details now shows field names dimmed and the level in its own color, such as Problem in red.
+- The scroll bars are now slimmer and have no arrow buttons.
+- A thin line now separates the status line at the bottom from the rest of the window.
+
 ## 1.12.5
 
 - Fixed Bastard running a copy of a Windows tool, such as sc.exe, found next to it instead of the one Windows ships.

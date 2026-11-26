@@ -3571,6 +3571,171 @@ class Window(unittest.TestCase):
         finally:
             b.save_exclusions = saved
 
+    def test_the_icon_is_a_png_with_clear_corners_and_a_red_dot_in_the_lens(self):
+        size = 24
+        data = b.icon_png(size)
+        self.assertTrue(data.startswith(b"\x89PNG\r\n\x1a\n"))
+        self.assertEqual(b.struct.unpack(">II", data[16:24]), (size, size))
+        start = data.index(b"IDAT") + 4
+        length = b.struct.unpack(">I", data[start - 8:start - 4])[0]
+        raw = b.zlib.decompress(data[start:start + length])
+        stride = 1 + size * 4
+        self.assertEqual(len(raw), stride * size)
+
+        def pixel(x, y):
+            return tuple(raw[y * stride + 1 + x * 4:y * stride + 5 + x * 4])
+
+        self.assertEqual(pixel(0, 0)[3], 0)
+        self.assertEqual(pixel(size - 1, size - 1)[3], 0)
+        self.assertEqual(pixel(10, 10), (0xf3, 0x8b, 0xa8, 255))
+        self.assertEqual(pixel(12, 2)[3], 255)
+        image = b.icon_image(self.root, size)
+        self.assertEqual((image.width(), image.height()), (size, size))
+        b.set_app_icon(self.root)
+        self.assertEqual([image.width() for image in self.root.app_icons], [16, 32, 48, 64])
+        b.dark_title_bar(self.root)
+
+    def test_markers_problems_and_warnings_stand_out_in_the_list(self):
+        app = b.App(self.root, b.parse_options([]), b.setup_style(self.root))
+        self.assertEqual(str(app.tree.tag_configure(b.MARK, "background")), b.Theme.ROW_MARK)
+        self.assertEqual(str(app.tree.tag_configure(b.ERROR, "background")), b.Theme.ROW_ERROR)
+        self.assertEqual(str(app.tree.tag_configure(b.WARN, "background")), b.Theme.ROW_WARN)
+        self.assertEqual(str(app.tree.tag_configure(b.INFO, "background")), "")
+        self.assertEqual(str(app.tree.tag_configure(b.ERROR, "foreground")), b.Theme.RED)
+
+    def test_the_empty_list_says_what_to_do_next(self):
+        app = b.App(self.root, b.parse_options([]), b.setup_style(self.root))
+        app.rules.set_lines([])
+        self.assertEqual(app.empty_state, ("No trace yet", "Press Start or F5 to begin one"))
+        self.assertEqual(app.empty.winfo_manager(), "place")
+        app.hub.emit(b.SRC_REG, b.KIND_REG, "HKCU\\Software\\Thing", b.CHANGE)
+        app._drain()
+        app._paint_empty()
+        self.assertIsNone(app.empty_state)
+        self.assertEqual(app.empty.winfo_manager(), "")
+        app.rows[b.SRC_REG].toggle()
+        app._rebuild()
+        app._paint_empty()
+        self.assertEqual(app.empty_state[0], "No event matches the filters")
+        self.assertEqual(app.empty.winfo_manager(), "place")
+        app.clear_timeline()
+        app._paint_empty()
+        self.assertEqual(app.empty_state[0], "No trace yet")
+
+    def test_a_trace_shows_rec_and_a_marker_flashes_the_line_under_the_buttons(self):
+        app = b.App(self.root, b.parse_options([]), b.setup_style(self.root))
+        self.assertEqual(app.rec_label.cget("text"), "")
+        self.assertEqual(app.stripe.cget("bg"), b.STRIPE_COLORS["idle"])
+        home = self.home
+
+        class Running:
+            started = time.time() - 5
+            stop_event = b.threading.Event()
+            finished = b.threading.Event()
+            log_path = os.path.join(home, "t.log")
+            writer = None
+            stopped_at = None
+            markers = []
+
+            def claim_marker(self, _number):
+                return False
+
+        app.session = Running()
+        app._check_session()
+        self.assertEqual(app.rec_label.cget("text"), "REC")
+        self.assertEqual(app.stripe.cget("bg"), b.Theme.RED)
+        self.assertEqual(app.rec_led.color, b.Theme.RED)
+        app._refresh()
+        self.assertEqual(app.rec_led.color, b.Theme.REC_DIM)
+        app._refresh()
+        self.assertEqual(app.rec_led.color, b.Theme.RED)
+        self.assertEqual(app.timer.cget("text"), "00:00:05")
+        app.add_marker()
+        self.assertEqual(app.stripe.cget("bg"), b.Theme.PURPLE)
+        self.root.after_cancel(app.pulse_job)
+        app._pulse_end()
+        self.assertEqual(app.stripe.cget("bg"), b.Theme.RED)
+        Running.stop_event.set()
+        app._check_session()
+        self.assertEqual(app.rec_label.cget("text"), "")
+        self.assertEqual(app.rec_led.color, b.Theme.YELLOW)
+        self.assertEqual(app.stripe.cget("bg"), b.Theme.YELLOW)
+        Running.finished.set()
+        app._check_session()
+        self.assertEqual(app.stripe.cget("bg"), b.Theme.GREEN)
+        self.assertEqual(app.rec_led.color, b.Theme.PANEL)
+
+    def test_the_sorted_column_shows_an_arrow_and_details_color_the_level(self):
+        app = b.App(self.root, b.parse_options([]), b.setup_style(self.root))
+        app._sort_by("process")
+        self.assertEqual(app.tree.heading("process", "text"), "Process \u25b2")
+        app._sort_by("process")
+        self.assertEqual(app.tree.heading("process", "text"), "Process \u25bc")
+        self.assertEqual(app.tree.heading("time", "text"), "Time")
+        self.assertIn("step", app.detail.tag_names("1.0"))
+        app.rules.set_lines([])
+        ev = app.hub.emit(b.SRC_PROBE, b.KIND_PROBE, "A policy locks the desktop background", b.ERROR,
+                          detail="Path:  HKCU\\Software\\Policies")
+        app._drain()
+        app.tree.selection_set(str(ev.seq))
+        app._selected()
+        lines = app.detail.get("1.0", "end").split("\n")
+        level = [number for number, text in enumerate(lines, 1) if text.startswith("Level:")][0]
+        self.assertIn(b.ERROR, app.detail.tag_names("%d.12" % level))
+        self.assertIn("key", app.detail.tag_names("%d.0" % level))
+        self.assertNotIn("key", app.detail.tag_names("%d.8" % level))
+        path = [number for number, text in enumerate(lines, 1) if text.startswith("Path:")][0]
+        self.assertIn("key", app.detail.tag_names("%d.0" % path))
+        headline = [number for number, text in enumerate(lines, 1) if text.startswith("A policy")][0]
+        self.assertEqual(app.detail.tag_names("%d.0" % headline), ())
+
+    def test_a_source_row_lights_up_under_the_pointer_and_dims_when_it_leaves(self):
+        app = b.App(self.root, b.parse_options([]), b.setup_style(self.root))
+        self.root.deiconify()
+        self.root.geometry("1200x700+0+0")
+        self.root.update()
+        row = app.rows[b.SRC_FILES]
+        row.title.event_generate("<Enter>")
+        self.assertEqual(row.cget("bg"), b.Theme.HOVER)
+        self.assertEqual(row.info.cget("bg"), b.Theme.HOVER)
+        self.assertEqual(str(row.led.cget("bg")), b.Theme.HOVER)
+        self.assertEqual(app.rows[b.SRC_REG].cget("bg"), b.Theme.PANEL)
+
+        class Inside:
+            x_root = row.info.winfo_rootx() + 2
+            y_root = row.info.winfo_rooty() + 2
+
+        class Away:
+            x_root = app.tree.winfo_rootx() + 5
+            y_root = app.tree.winfo_rooty() + 60
+
+        row._leave(Inside)
+        self.assertEqual(row.cget("bg"), b.Theme.HOVER)
+        row._leave(Away)
+        self.assertEqual(row.cget("bg"), b.Theme.PANEL)
+        self.assertEqual(row.title.cget("bg"), b.Theme.PANEL)
+
+    def test_every_toolbar_button_explains_itself_and_names_its_key(self):
+        app = b.App(self.root, b.parse_options([]), b.setup_style(self.root))
+        self.root.deiconify()
+        self.root.update()
+        texts = {str(tip.widget): tip.text for tip in app.tips}
+        self.assertEqual(len(texts), 7)
+        self.assertTrue(texts[str(app.btn_start)].endswith("(F5)"))
+        self.assertTrue(texts[str(app.btn_stop)].endswith("(Shift+F5)"))
+        self.assertTrue(texts[str(app.btn_marker)].endswith("(F8)"))
+        self.assertIn("Ctrl+S", texts[str(app.btn_export)])
+        self.assertIn("Ctrl+J", texts[str(app.btn_export)])
+        tip = app.tips[0]
+        tip._schedule()
+        self.assertIsNotNone(tip.job)
+        tip.show()
+        self.assertIsNotNone(tip.window)
+        self.assertTrue(tip.window.winfo_exists())
+        tip.hide()
+        self.assertIsNone(tip.window)
+        self.assertIsNone(tip.job)
+
 
 class ReleaseNotes(unittest.TestCase):
     def test_only_the_notes_that_differ_are_rewritten(self):

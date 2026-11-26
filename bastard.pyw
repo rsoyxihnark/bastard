@@ -1,3 +1,4 @@
+import base64
 import bisect
 import collections
 import configparser
@@ -11,6 +12,7 @@ import os
 import platform
 import queue
 import re
+import struct
 import subprocess
 import sys
 import threading
@@ -18,6 +20,7 @@ import time
 import traceback
 import uuid
 import xml.etree.ElementTree as ET
+import zlib
 from datetime import datetime, timezone
 from xml.sax.saxutils import escape as xml_escape
 
@@ -25,7 +28,7 @@ import tkinter as tk
 import tkinter.font as tkfont
 from tkinter import filedialog, messagebox, ttk
 
-VERSION = "1.12.5"
+VERSION = "1.13.0"
 
 APP_NAME = "Bastard"
 IS_WIN = os.name == "nt"
@@ -4341,6 +4344,12 @@ class Theme:
     SELECT = "#45475a"
     SCROLL = "#585b70"
     SCROLL_HOVER = "#7f849c"
+    HOVER = "#262638"
+    REC_DIM = "#5a3446"
+    ROW_MARK = "#3d3652"
+    ROW_ERROR = "#382b3d"
+    ROW_WARN = "#302a35"
+    TIP = "#313244"
 
 
 STATE_COLORS = {"running": Theme.GREEN, "done": Theme.GREEN, "starting": Theme.YELLOW,
@@ -4349,6 +4358,21 @@ STATE_COLORS = {"running": Theme.GREEN, "done": Theme.GREEN, "starting": Theme.Y
 STATE_WORDS = {"running": "running", "done": "done", "starting": "starting", "finishing": "finishing",
                "warn": "limited", "failed": "failed", "off": "off", "idle": "idle"}
 LEVEL_COLORS = {INFO: Theme.FG, CHANGE: Theme.YELLOW, WARN: Theme.ORANGE, ERROR: Theme.RED, MARK: Theme.PURPLE}
+LEVEL_ROWS = {MARK: Theme.ROW_MARK, ERROR: Theme.ROW_ERROR, WARN: Theme.ROW_WARN}
+LEVEL_BY_LABEL = {label: level for level, label in LEVEL_LABELS.items()}
+STRIPE_COLORS = {"idle": Theme.BORDER, "running": Theme.RED, "finishing": Theme.YELLOW, "done": Theme.GREEN}
+SORT_ARROWS = {False: " \u25b2", True: " \u25bc"}
+BUTTON_TIPS = {
+    "start": "Start a trace (F5)",
+    "stop": "Stop the trace and read back what the sources captured (Shift+F5)",
+    "marker": "Mark the moment you try what you want to watch (F8)",
+    "export": "Save the listed events as CSV (Ctrl+S) or JSON (Ctrl+J)",
+    "filter": "Rules that keep events out of the timeline and out of the log",
+    "clear": "Empty the list, the log on disk keeps everything",
+    "options": "How large the trace log may grow and how many ProcMon rows a trace reads",
+}
+DETAIL_KEY_RE = re.compile(r"^([A-Z][A-Za-z ]{1,14}:) {2,}")
+DETAIL_STEP_RE = re.compile(r"^\d+\. ")
 SHOW_CHOICES = ("All events", "Changes and problems", "Problems only")
 TREE_COLUMNS = ("time", "source", "kind", "process", "pid", "event")
 TREE_TITLES = {"time": "Time", "source": "Source", "kind": "Kind", "process": "Process", "pid": "PID",
@@ -4426,10 +4450,18 @@ def setup_style(root):
     style_set(style, "Treeview.Heading", background=Theme.PANEL2, foreground=Theme.DIM, borderwidth=0, relief="flat",
               padding=(int(6 * scale), int(5 * scale)), font=("Segoe UI Semibold", 8))
     style_map(style, "Treeview.Heading", background=[("active", Theme.PANEL3)], foreground=[("active", Theme.FG)])
-    for name in ("Vertical.TScrollbar", "Horizontal.TScrollbar"):
-        style_set(style, name, background=Theme.SCROLL, troughcolor=Theme.PANEL2, bordercolor=Theme.PANEL,
-                  arrowcolor=Theme.FG, gripcount=0, relief="flat", borderwidth=0, arrowsize=int(13 * scale))
-        style_map(style, name, background=[("pressed", Theme.SCROLL_HOVER), ("active", Theme.SCROLL_HOVER)])
+    for orient in ("Vertical", "Horizontal"):
+        name = orient + ".TScrollbar"
+        try:
+            style.layout(name, [(orient + ".Scrollbar.trough", {"sticky": "nswe", "children": [
+                (orient + ".Scrollbar.thumb", {"expand": "1", "sticky": "nswe"})]})])
+        except tk.TclError:
+            pass
+        style_set(style, name, background=Theme.SCROLL, troughcolor=Theme.PANEL, bordercolor=Theme.PANEL,
+                  lightcolor=Theme.SCROLL, darkcolor=Theme.SCROLL, arrowcolor=Theme.FG, gripcount=0,
+                  relief="flat", borderwidth=0, arrowsize=int(10 * scale))
+        hover = [("pressed", Theme.SCROLL_HOVER), ("active", Theme.SCROLL_HOVER)]
+        style_map(style, name, background=hover, lightcolor=hover, darkcolor=hover)
     style_set(style, "TCombobox", fieldbackground=Theme.PANEL2, background=Theme.PANEL2, foreground=Theme.FG,
               arrowcolor=Theme.FG, bordercolor=Theme.BORDER, padding=int(3 * scale))
     style_map(style, "TCombobox", fieldbackground=[("readonly", Theme.PANEL2)], foreground=[("readonly", Theme.FG)],
@@ -4484,6 +4516,138 @@ def write_export(path, kind, events):
                       fh, indent=1, ensure_ascii=False)
 
 
+def icon_color(u, v):
+    du, dv = u - 0.42, v - 0.42
+    ring = (du * du + dv * dv) ** 0.5
+    if ring <= 0.1:
+        return Theme.RED
+    if abs(ring - 0.25) <= 0.05:
+        return Theme.ACCENT
+    h = max(0.0, min(1.0, (u + v - 1.24) / 0.36))
+    hu, hv = u - 0.62 - 0.18 * h, v - 0.62 - 0.18 * h
+    if hu * hu + hv * hv <= 0.0036:
+        return Theme.ACCENT
+    qu, qv = max(abs(u - 0.5) - 0.28, 0.0), max(abs(v - 0.5) - 0.28, 0.0)
+    if qu * qu + qv * qv <= 0.0484:
+        return Theme.PANEL
+    return None
+
+
+def png_chunk(tag, data):
+    return struct.pack(">I", len(data)) + tag + data + struct.pack(">I", zlib.crc32(tag + data) & 0xFFFFFFFF)
+
+
+def icon_png(size, samples=3):
+    rgb = {}
+    total = samples * samples
+    raw = bytearray()
+    for y in range(size):
+        raw.append(0)
+        for x in range(size):
+            red = green = blue = hits = 0
+            for sy in range(samples):
+                for sx in range(samples):
+                    color = icon_color((x + (sx + 0.5) / samples) / size, (y + (sy + 0.5) / samples) / size)
+                    if color is None:
+                        continue
+                    if color not in rgb:
+                        rgb[color] = (int(color[1:3], 16), int(color[3:5], 16), int(color[5:7], 16))
+                    r, g, b = rgb[color]
+                    red, green, blue, hits = red + r, green + g, blue + b, hits + 1
+            if hits:
+                raw.extend((red // hits, green // hits, blue // hits, 255 * hits // total))
+            else:
+                raw.extend((0, 0, 0, 0))
+    header = struct.pack(">IIBBBBB", size, size, 8, 6, 0, 0, 0)
+    return (b"\x89PNG\r\n\x1a\n" + png_chunk(b"IHDR", header) + png_chunk(b"IDAT", zlib.compress(bytes(raw), 9))
+            + png_chunk(b"IEND", b""))
+
+
+def icon_image(master, size):
+    data = base64.b64encode(icon_png(max(8, int(size)))).decode("ascii")
+    return tk.PhotoImage(master=master, data=data, format="png")
+
+
+def set_app_icon(root):
+    try:
+        images = [icon_image(root, size) for size in (16, 32, 48, 64)]
+        root.iconphoto(True, *images)
+        root.app_icons = images
+    except Exception as exc:
+        LOG.warning("The window icon could not be set: %s", exc)
+
+
+def colorref(color):
+    return int(color[5:7] + color[3:5] + color[1:3], 16)
+
+
+def dark_title_bar(window):
+    if not IS_WIN:
+        return
+    try:
+        window.update_idletasks()
+        hwnd = wt.HWND(int(window.wm_frame(), 16))
+        dwm = ctypes.windll.dwmapi.DwmSetWindowAttribute
+        for attribute, value in ((20, 1), (19, 1), (35, colorref(Theme.PANEL)), (36, colorref(Theme.FG)),
+                                 (34, colorref(Theme.BORDER))):
+            data = ctypes.c_int(value)
+            dwm(hwnd, attribute, ctypes.byref(data), ctypes.sizeof(data))
+        ctypes.windll.user32.SetWindowPos(hwnd, None, 0, 0, 0, 0, 0x37)
+    except Exception as exc:
+        LOG.debug("The dark title bar could not be set: %s", exc)
+
+
+class Tip:
+    def __init__(self, widget, text, scale):
+        self.widget = widget
+        self.text = text
+        self.scale = scale
+        self.job = None
+        self.window = None
+        widget.bind("<Enter>", self._schedule, add="+")
+        widget.bind("<Leave>", self.hide, add="+")
+        widget.bind("<ButtonPress>", self.hide, add="+")
+
+    def _schedule(self, _event=None):
+        self.hide()
+        self.job = self.widget.after(550, self.show)
+
+    def show(self):
+        self.job = None
+        if self.window is not None:
+            return
+        try:
+            window = tk.Toplevel(self.widget)
+            window.overrideredirect(True)
+            try:
+                window.attributes("-topmost", True)
+            except tk.TclError:
+                pass
+            tk.Label(window, text=self.text, bg=Theme.TIP, fg=Theme.FG, font=("Segoe UI", 9), bd=0,
+                     padx=int(9 * self.scale), pady=int(4 * self.scale), highlightthickness=1,
+                     highlightbackground=Theme.SCROLL).pack()
+            window.update_idletasks()
+            left, _top, span, _height = screen_box(window)
+            x = self.widget.winfo_rootx() + (self.widget.winfo_width() - window.winfo_reqwidth()) // 2
+            x = max(left + 4, min(x, left + span - window.winfo_reqwidth() - 4))
+            y = self.widget.winfo_rooty() + self.widget.winfo_height() + int(6 * self.scale)
+            window.geometry("+%d+%d" % (x, y))
+            self.window = window
+        except tk.TclError:
+            self.window = None
+
+    def hide(self, _event=None):
+        if self.job is not None:
+            self.widget.after_cancel(self.job)
+            self.job = None
+        if self.window is not None:
+            try:
+                self.window.destroy()
+            except tk.TclError:
+                pass
+            self.window = None
+
+
 class Led(tk.Canvas):
     def __init__(self, parent, size, bg):
         super().__init__(parent, width=size, height=size, bg=bg, highlightthickness=0, bd=0)
@@ -4513,13 +4677,32 @@ class SourceRow(tk.Frame):
         self.info = tk.Label(self, text="idle", bg=Theme.PANEL, fg=Theme.DIM, font=fonts["small"], anchor="w")
         self.info.pack(fill="x", padx=(int(30 * scale), int(8 * scale)), pady=(0, int(3 * scale)))
         self.last = None
-        for widget in (self, top, self.led, self.title, self.count, self.info):
+        self.shade = Theme.PANEL
+        self.parts = (self, top, self.led, self.title, self.count, self.info)
+        for widget in self.parts:
             try:
                 widget.configure(cursor="hand2")
             except tk.TclError:
                 pass
             widget.bind("<Button-1>", self.toggle)
+            widget.bind("<Enter>", lambda _event: self._shade(Theme.HOVER))
+            widget.bind("<Leave>", self._leave)
         self._paint()
+
+    def _leave(self, event=None):
+        try:
+            inside = str(self.winfo_containing(event.x_root, event.y_root) or "")
+        except (tk.TclError, KeyError, AttributeError):
+            inside = ""
+        if inside != str(self) and not inside.startswith(str(self) + "."):
+            self._shade(Theme.PANEL)
+
+    def _shade(self, color):
+        if color == self.shade:
+            return
+        self.shade = color
+        for widget in self.parts:
+            widget.configure(bg=color)
 
     def toggle(self, _event=None):
         self.on = not self.on
@@ -4577,6 +4760,7 @@ def ask_admin(root, scale):
     x = max(0, (window.winfo_screenwidth() - width) // 2)
     y = max(0, (window.winfo_screenheight() - height) // 3)
     window.geometry("+%d+%d" % (x, y))
+    dark_title_bar(window)
     window.lift()
     window.focus_force()
     window.wait_window()
@@ -4619,6 +4803,9 @@ class App:
         self.flash_until = 0.0
         self.terms = []
         self.selftest = None
+        self.empty_state = None
+        self.blink = False
+        self.pulse_job = None
         self.admin = is_admin()
         saved_sources = self.settings.get("sources") if isinstance(self.settings.get("sources"), dict) else {}
         self.saved_sources = {name: bool(saved_sources.get(name, True)) for name in SOURCE_NAMES}
@@ -4660,6 +4847,13 @@ class App:
 
         bar = tk.Frame(root, bg=Theme.PANEL, padx=self.px(10), pady=self.px(8))
         bar.pack(side="top", fill="x")
+        self.stripe = tk.Frame(root, bg=STRIPE_COLORS["idle"], height=max(2, self.px(2)))
+        self.stripe.pack(side="top", fill="x")
+        try:
+            self.logo = icon_image(root, self.px(20))
+            tk.Label(bar, image=self.logo, bg=Theme.PANEL, bd=0).pack(side="left", padx=(0, self.px(7)))
+        except tk.TclError:
+            self.logo = None
         tk.Label(bar, text="BASTARD", bg=Theme.PANEL, fg=Theme.ACCENT, font=self.fonts["title"]).pack(side="left")
         tk.Label(bar, text=VERSION, bg=Theme.PANEL, fg=Theme.DIM, font=self.fonts["small"]).pack(
             side="left", padx=(self.px(4), self.px(16)))
@@ -4669,8 +4863,14 @@ class App:
         self.btn_stop.pack(side="left", padx=self.px(2))
         self.btn_marker = ttk.Button(bar, text="Marker", style="Warn.TButton", command=self.add_marker)
         self.btn_marker.pack(side="left", padx=(self.px(10), self.px(2)))
+        self.rec_led = Led(bar, max(8, self.px(10)), Theme.PANEL)
+        self.rec_led.set(Theme.PANEL)
+        self.rec_led.pack(side="left", padx=(self.px(16), self.px(5)))
+        self.rec_label = tk.Label(bar, text="", bg=Theme.PANEL, fg=Theme.RED, font=("Segoe UI Semibold", 8), width=4,
+                                  anchor="w")
+        self.rec_label.pack(side="left")
         self.timer = tk.Label(bar, text="", bg=Theme.PANEL, fg=Theme.GREEN, font=self.fonts["mono_bold"])
-        self.timer.pack(side="left", padx=self.px(14))
+        self.timer.pack(side="left", padx=(self.px(2), self.px(14)))
         self.btn_options = ttk.Button(bar, text="Options", command=self.edit_options)
         self.btn_options.pack(side="right", padx=self.px(2))
         self.btn_clear = ttk.Button(bar, text="Clear", command=self.clear_timeline)
@@ -4683,6 +4883,10 @@ class App:
                                     activeforeground=Theme.PANEL, bd=0)
         self.export_popup.add_command(label="Save as CSV", accelerator="Ctrl+S", command=lambda: self.export("csv"))
         self.export_popup.add_command(label="Save as JSON", accelerator="Ctrl+J", command=lambda: self.export("json"))
+        self.tips = [Tip(widget, BUTTON_TIPS[key], self.scale) for key, widget in (
+            ("start", self.btn_start), ("stop", self.btn_stop), ("marker", self.btn_marker),
+            ("export", self.btn_export), ("filter", self.btn_filter), ("clear", self.btn_clear),
+            ("options", self.btn_options))]
         admin_text = "administrator" if self.admin else ("not administrator" if IS_WIN else "")
         tk.Label(bar, text=admin_text, bg=Theme.PANEL, fg=Theme.GREEN if self.admin else Theme.ORANGE,
                  font=self.fonts["small"]).pack(side="right", padx=self.px(12))
@@ -4690,6 +4894,7 @@ class App:
         footer = tk.Frame(root, bg=Theme.PANEL, height=self.px(26))
         footer.pack(side="bottom", fill="x")
         footer.pack_propagate(False)
+        tk.Frame(root, bg=Theme.BORDER, height=1).pack(side="bottom", fill="x")
         self.status_label = tk.Label(footer, text="Ready", bg=Theme.PANEL, fg=Theme.DIM, anchor="w",
                                      font=self.fonts["small"])
         self.status_label.pack(side="left", padx=self.px(12))
@@ -4765,8 +4970,22 @@ class App:
         scroll_x.grid(row=1, column=0, sticky="ew")
         upper.rowconfigure(0, weight=1)
         upper.columnconfigure(0, weight=1)
+        self.empty = tk.Frame(upper, bg=Theme.PANEL)
+        try:
+            self.empty_logo = icon_image(root, self.px(44))
+            tk.Label(self.empty, image=self.empty_logo, bg=Theme.PANEL, bd=0).pack(pady=(0, self.px(10)))
+        except tk.TclError:
+            self.empty_logo = None
+        self.empty_title = tk.Label(self.empty, text="", bg=Theme.PANEL, fg=Theme.FG,
+                                    font=("Segoe UI Semibold", 12))
+        self.empty_title.pack()
+        self.empty_hint = tk.Label(self.empty, text="", bg=Theme.PANEL, fg=Theme.DIM, font=self.fonts["ui"])
+        self.empty_hint.pack(pady=(self.px(4), 0))
         for level, color in LEVEL_COLORS.items():
-            self.tree.tag_configure(level, foreground=color)
+            if level in LEVEL_ROWS:
+                self.tree.tag_configure(level, foreground=color, background=LEVEL_ROWS[level])
+            else:
+                self.tree.tag_configure(level, foreground=color)
         self.tree.tag_configure(MARK, foreground=Theme.PURPLE, font=self.fonts["mono_bold"])
         self.menu = tk.Menu(self.tree, tearoff=0, bg=Theme.PANEL, fg=Theme.FG,
                             activebackground=Theme.ACCENT, activeforeground=Theme.PANEL, bd=0)
@@ -4791,6 +5010,10 @@ class App:
                               selectbackground=Theme.SELECT, highlightthickness=0)
         detail_scroll = ttk.Scrollbar(holder, orient="vertical", command=self.detail.yview)
         self.detail.configure(yscrollcommand=detail_scroll.set)
+        self.detail.tag_configure("key", foreground=Theme.DIM)
+        self.detail.tag_configure("step", foreground=Theme.ACCENT, font=self.fonts["mono_bold"])
+        for level, color in LEVEL_COLORS.items():
+            self.detail.tag_configure(level, foreground=color, font=self.fonts["mono_bold"])
         detail_scroll.pack(side="right", fill="y")
         self.detail.pack(side="left", fill="both", expand=True)
         self.paned.add(upper, weight=4)
@@ -4800,6 +5023,7 @@ class App:
         if sash and sash > self.px(120):
             root.after(150, lambda: self._restore_sash(sash))
         self._apply_state("idle")
+        self._paint_empty()
 
     def _restore_sash(self, value):
         try:
@@ -4835,7 +5059,45 @@ class App:
         self.detail.configure(state="normal")
         self.detail.delete("1.0", "end")
         self.detail.insert("end", text)
+        for number, line in enumerate(text.split("\n"), 1):
+            match = DETAIL_KEY_RE.match(line)
+            if match:
+                self.detail.tag_add("key", "%d.0" % number, "%d.%d" % (number, len(match.group(1))))
+                level = LEVEL_BY_LABEL.get(line[match.end():].strip()) if match.group(1) == "Level:" else None
+                if level:
+                    self.detail.tag_add(level, "%d.%d" % (number, match.end()), "%d.end" % number)
+                continue
+            match = DETAIL_STEP_RE.match(line)
+            if match:
+                self.detail.tag_add("step", "%d.0" % number, "%d.%d" % (number, match.end() - 1))
         self.detail.configure(state="disabled")
+
+    def _empty_text(self):
+        if self.shown:
+            return None
+        session = self.session
+        if self.store.items:
+            return ("No event matches the filters", "Change Show or Search, or click a hidden source to show it again")
+        if session is None:
+            return ("No trace yet", "Press Start or F5 to begin one")
+        if not session.stop_event.is_set():
+            return ("Waiting for events", "Press Marker or F8 the moment you try what you want to watch")
+        if not session.finished.is_set():
+            return ("Finishing the trace", "The sources are reading back what they captured")
+        return ("The list is empty", "Press Start or F5 to begin a new trace")
+
+    def _paint_empty(self):
+        state = self._empty_text()
+        if state == self.empty_state:
+            return
+        self.empty_state = state
+        if state is None:
+            self.empty.place_forget()
+            return
+        self.empty_title.configure(text=state[0])
+        self.empty_hint.configure(text=state[1])
+        self.empty.place(in_=self.tree, relx=0.5, rely=0.42, anchor="center")
+        self.empty.lift()
 
     def _match(self, ev):
         if ev.kind == KIND_MARK:
@@ -5007,7 +5269,7 @@ class App:
         for column in TREE_COLUMNS:
             title = TREE_TITLES[column]
             if column == self.sort_column:
-                title += " v" if self.sort_down else " ^"
+                title += SORT_ARROWS[bool(self.sort_down)]
             self.tree.heading(column, text=title)
 
     def _sort_by(self, column):
@@ -5071,6 +5333,7 @@ class App:
         try:
             self._drain()
             self._check_session()
+            self._paint_empty()
         except Exception:
             self._tk_error(*sys.exc_info())
         self.root.after(100, self._tick)
@@ -5083,7 +5346,9 @@ class App:
                 row.show(state, note, counts.get(name, 0))
             session = self.session
             if session is not None and not session.stop_event.is_set():
-                self.timer.configure(text=duration_clock(time.time() - session.started), fg=Theme.GREEN)
+                self.blink = not self.blink
+                self.rec_led.set(Theme.RED if self.blink else Theme.REC_DIM)
+                self.timer.configure(text=duration_clock(time.time() - session.started), fg=Theme.FG)
             elif session is not None and not session.finished.is_set():
                 self.timer.configure(text="finishing", fg=Theme.YELLOW)
             if time.time() > self.flash_until:
@@ -5147,6 +5412,11 @@ class App:
         self.btn_start.configure(state="disabled" if busy or self.closing else "normal")
         self.btn_stop.configure(state="normal" if running and not self.closing else "disabled")
         self.btn_marker.configure(state="normal" if running and not self.closing else "disabled")
+        if self.pulse_job is None:
+            self.stripe.configure(bg=STRIPE_COLORS.get(state, Theme.BORDER))
+        self.blink = running
+        self.rec_led.set(Theme.RED if running else (Theme.YELLOW if state == "finishing" else Theme.PANEL))
+        self.rec_label.configure(text="REC" if running else "")
         session = self.session
         if state == "done" and session is not None:
             self.timer.configure(text=duration_clock((session.stopped_at or time.time()) - session.started),
@@ -5186,7 +5456,18 @@ class App:
         session.markers.append((number, moment))
         self.hub.mark(moment)
         self.hub.emit(SRC_SYSTEM, KIND_MARK, "Marker %d" % number, MARK, ts=moment)
+        self._pulse(Theme.PURPLE)
         self.root.after(int(MARKER_DELAY * 1000), lambda: self._marker_due(session, number, moment))
+
+    def _pulse(self, color):
+        if self.pulse_job is not None:
+            self.root.after_cancel(self.pulse_job)
+        self.stripe.configure(bg=color)
+        self.pulse_job = self.root.after(450, self._pulse_end)
+
+    def _pulse_end(self):
+        self.pulse_job = None
+        self.stripe.configure(bg=STRIPE_COLORS.get(self.ui_state, Theme.BORDER))
 
     def _marker_due(self, session, number, moment):
         if session is not self.session or not session.claim_marker(number):
@@ -5341,6 +5622,7 @@ class App:
         window.configure(bg=Theme.PANEL)
         window.transient(self.root)
         window.bind("<Escape>", lambda _event, win=window: self._close_dialog(win))
+        window.after_idle(dark_title_bar, window)
         try:
             window.geometry("+%d+%d" % (self.root.winfo_rootx() + self.px(70),
                                         self.root.winfo_rooty() + self.px(70)))
@@ -5599,6 +5881,7 @@ def main(argv):
     root = tk.Tk()
     root.withdraw()
     scale = setup_style(root)
+    set_app_icon(root)
     if IS_WIN and not is_admin() and not options["selftest"]:
         choice = ask_admin(root, scale)
         if choice == "exit":
@@ -5611,6 +5894,7 @@ def main(argv):
             messagebox.showwarning("Bastard", "Bastard could not restart as administrator, so it carries on without.")
     app = App(root, options, scale)
     root.deiconify()
+    dark_title_bar(root)
     root.mainloop()
     LOG.info("Bastard closed")
     return app.exit_code
